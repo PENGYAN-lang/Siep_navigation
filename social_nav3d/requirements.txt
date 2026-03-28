@@ -1,0 +1,10 @@
+pybullet==3.2.6
+numpy>=1.24
+matplotlib>=3.7
+scipy>=1.10
+imageio>=2.31
+imageio-ffmpeg>=0.4.9
+pydantic>=2.5
+# Optional (future learning-based prediction / policies)
+# torch is not pinned here because CUDA builds vary; see README for install command.
+PyYAML>=6.0

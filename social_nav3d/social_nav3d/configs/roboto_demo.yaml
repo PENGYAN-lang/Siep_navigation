@@ -1,0 +1,50 @@
+seed: 42
+sim:
+  dt: 0.05
+  max_steps: 2000
+  gui: false
+  record_video: false
+  out_dir: runs
+world:
+  size_xy: [20.0, 20.0]
+  obstacles:
+    # 中央长墙
+    - {pos: [10.0, 10.0, 0.5], half_extents: [0.5, 8.0, 0.5]}
+    # 分散障碍
+    - {pos: [4.0, 12.0, 0.5], half_extents: [1.0, 2.0, 0.5]}
+    - {pos: [16.0, 6.0, 0.5], half_extents: [1.5, 2.0, 0.5]}
+    - {pos: [8.0, 4.0, 0.5], half_extents: [0.3, 0.3, 0.5]}
+    - {pos: [12.0, 15.0, 0.5], half_extents: [0.3, 0.3, 0.5]}
+  ramps:
+    - {pos: [5.0, 5.0, 0.0], size: [3.0, 2.0, 0.2], pitch_deg: 10}
+robot:
+  start: [1.5, 1.5, 0.0]
+  goal:  [18.0, 18.0, 0.0]
+  # 这些数值在加载 URDF 后会被程序重新计算
+  radius: 0.4
+  height: 1.0
+  max_v: 1.2
+  max_w: 1.8
+  urdf: "/inspire/ssd/tenant_predefaa-9a1b-4522-bb10-8850f313be13/global_user/8717-pengyan/Siep_navigation/social_nav3d/roboto_origin/modules/atom01_description/urdf/atom01.urdf"  # 根据实际路径调整
+  scale: 2.0  # 如需要缩放可修改此值
+lidar:
+  n_az: 180
+  n_el: 5
+  max_range: 8.0
+  el_deg: [-10, -5, 0, 5, 10]
+pedestrians:
+  count: 20
+  speed_range: [0.3, 1.3]
+  radius: 0.3
+  personal_space:
+    sigma_front: 1.6
+    sigma_side: 0.9
+    sigma_back: 0.7
+planner:
+  horizon_s: 2.0
+  n_samples: 160
+  w_goal: 1.0
+  w_smooth: 0.1
+  w_obstacle: 3.0
+  w_social: 2.5
+  min_clearance: 0.35

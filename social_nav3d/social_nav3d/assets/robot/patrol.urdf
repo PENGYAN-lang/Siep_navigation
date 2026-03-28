@@ -1,0 +1,28 @@
+<robot name="patrol">
+  <link name="base_link">
+    <inertial>
+      <mass value="25.0"/>
+      <origin xyz="0 0 0.15"/>
+      <inertia ixx="1" ixy="0" ixz="0" iyy="1" iyz="0" izz="1"/>
+    </inertial>
+
+    <!-- collision: 简化几何 -->
+    <collision>
+      <origin xyz="0 0 0.15" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.32" length="0.6"/>
+      </geometry>
+    </collision>
+
+    <!-- visual: 好看的mesh -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/body.obj" scale="1 1 1"/>
+      </geometry>
+      <material name="dark">
+        <color rgba="0.12 0.12 0.14 1"/>
+      </material>
+    </visual>
+  </link>
+</robot>
