@@ -306,12 +306,13 @@ class SocialNavSim:
             rgbaColor=[cr, cg, cb, 1.0], physicsClientId=self.client,
         )
 
-        # link 0 = torso, parent = base (index 0 in parent array is base link)
-        # link 1 = head  (parent = torso link 0)
-        # link 2 = left upper arm (parent = torso)
-        # link 3 = right upper arm (parent = torso)
-        # link 4 = left upper leg (parent = base)
-        # link 5 = right upper leg (parent = base)
+        # PyBullet linkParentIndices: 0 = base body, 1 = link 0, 2 = link 1, …
+        # link 0 = torso  → parentIdx 0 (base)
+        # link 1 = head   → parentIdx 1 (link 0 = torso)
+        # link 2 = left arm  → parentIdx 1 (torso)
+        # link 3 = right arm → parentIdx 1 (torso)
+        # link 4 = left leg  → parentIdx 0 (base)
+        # link 5 = right leg → parentIdx 0 (base)
         ident_orn = p.getQuaternionFromEuler([0, 0, 0])
 
         visuals    = [torso_v, head_v, arm_v,       arm_v,        leg_v,         leg_v]

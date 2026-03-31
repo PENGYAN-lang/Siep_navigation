@@ -25,7 +25,7 @@ Five stimulus channels are combined:
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -273,7 +273,7 @@ class SIEPPlanner:
         rows = max(1, int((ymax - ymin) / cell_size))
         total_cells = cols * rows
 
-        visited_cells: set = set()
+        visited_cells: Set[Tuple[int, int]] = set()
         for pos in self._visited:
             ci = int((pos[0] - xmin) / cell_size)
             ri = int((pos[1] - ymin) / cell_size)
