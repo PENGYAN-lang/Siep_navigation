@@ -39,8 +39,9 @@ import numpy as np
 CROWD_RADIUS: float = 4.0          # [m] radius for density counting
 CORRIDOR_THRESHOLD: float = 2.5    # [m] max free width to classify as corridor
 GROUP_DIST_THRESHOLD: float = 1.5  # [m] pedestrians within this radius form group
-HEAD_ON_CONE: float = math.radians(150.0)  # [rad] angle cone for head-on detection
-SAME_DIR_CONE: float = math.radians(60.0)  # [rad] for co-flow detection
+# Head-on detection: pedestrians moving within 30° of directly opposite direction
+HEAD_ON_ANGLE_THRESH: float = math.pi - math.radians(30.0)  # ≈ 150° velocity angle
+SAME_DIR_CONE: float = math.radians(60.0)  # [rad] half-cone for co-flow detection
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -154,8 +155,9 @@ def infer_context(
         if angle < SAME_DIR_CONE:
             n_coflow += 1
             flow_dirs.append(pyaw)
-        elif angle > HEAD_ON_CONE - math.pi:
-            # Relative angle > ~150° from head-on cone half → head-on
+        elif angle > HEAD_ON_ANGLE_THRESH:
+            # angle > 150°: pedestrian moving nearly opposite to robot → head-on candidate
+            # Additionally check that the pedestrian is in front of the robot
             rel_angle = math.atan2(float(pxy[1] - robot_xy[1]),
                                    float(pxy[0] - robot_xy[0]))
             ang_diff = abs(_wrap_pi(rel_angle - robot_yaw))

@@ -411,12 +411,6 @@ class SocialNavSim:
                 p.getQuaternionFromEuler([0, 0, ped.yaw]),
                 physicsClientId=self.client
             )
-            p.resetBasePositionAndOrientation(
-                ped.body_id,
-                [float(ped.xy[0]), float(ped.xy[1]), 0.9 / 2 + ped.radius],
-                p.getQuaternionFromEuler([0, 0, ped.yaw]),
-                physicsClientId=self.client
-            )
 
     def get_lidar_scan(self) -> Tuple[np.ndarray, np.ndarray]:
         base_pos, base_orn = p.getBasePositionAndOrientation(self.robot_id, physicsClientId=self.client)

@@ -153,7 +153,7 @@ def run_ablation(
     out_dir: Path,
     max_steps: Optional[int] = None,
     base_seed: int = 42,
-) -> Dict[str, float]:
+) -> Dict[str, object]:
     """Run n_episodes for one ablation configuration, save results.
 
     Returns aggregated summary statistics.
@@ -181,7 +181,7 @@ def run_ablation(
             writer.writerows(all_metrics)
 
     # Compute summary statistics
-    summary: Dict[str, float] = {}
+    summary: Dict[str, object] = {}
     numeric_keys = [k for k in all_metrics[0].keys()
                     if k not in ('episode', 'seed')]
     for k in numeric_keys:
@@ -193,7 +193,7 @@ def run_ablation(
             summary[f'{k}_mean'] = float('nan')
             summary[f'{k}_std'] = float('nan')
 
-    summary['ablation'] = ablation_name  # type: ignore[assignment]
+    summary['ablation'] = ablation_name
     summary['n_episodes'] = float(n_episodes)
 
     json_path = out_dir / 'summary.json'
@@ -217,7 +217,7 @@ def run_all_ablations(
     Saves summary_plot.png in out_dir.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    summaries: Dict[str, Dict[str, float]] = {}
+    summaries: Dict[str, Dict[str, object]] = {}
 
     for abl in ablations:
         print(f'\n=== Ablation: {abl} ===')
@@ -238,7 +238,7 @@ def run_all_ablations(
 
 
 def _plot_ablation_comparison(
-    summaries: Dict[str, Dict[str, float]],
+    summaries: Dict[str, Dict[str, object]],
     out_dir: Path,
 ) -> None:
     """Generate a multi-panel bar chart comparing ablation metrics."""
