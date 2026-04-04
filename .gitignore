@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Outputs / run artifacts (keep trajectory PNGs tracked for demo)
+runs/**/*.mp4
+runs/**/*.csv
+runs/**/*.json
+/tmp/
+
+# OS
+.DS_Store
+*.swp
