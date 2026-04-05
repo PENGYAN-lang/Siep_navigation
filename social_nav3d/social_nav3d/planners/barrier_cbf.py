@@ -276,7 +276,7 @@ class BarrierCBF:
 
 if __name__ == "__main__":
 
-    def _test_barrier_cbf() -> None:  # noqa: WPS430
+    def test_barrier_cbf() -> None:  # noqa: WPS430
         """Basic correctness checks for :class:`BarrierCBF`.
 
         Scenario A — obstacle directly in front at 0.5 m (inside safe zone):
@@ -360,4 +360,4 @@ if __name__ == "__main__":
 
         print("\nAll BarrierCBF tests passed ✓")
 
-    _test_barrier_cbf()
+    test_barrier_cbf()
