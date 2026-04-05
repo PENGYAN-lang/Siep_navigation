@@ -14,8 +14,10 @@ from ..utils.social import PersonalSpace
 from .pedestrian_fsm import (
     FSMPedestrian,
     create_fsm_pedestrians,
+    create_typed_fsm_pedestrians,
     step_fsm_pedestrians,
 )
+from .video_recorder import VideoRecorder3D, create_recorder
 
 
 @dataclass
@@ -88,11 +90,39 @@ class SocialNavSim:
         # Visited positions for exploration coverage tracking
         self._visited_xys: List[np.ndarray] = []
 
+        # ── Video recorder (optional) ─────────────────────────────────────
+        self._recorder: Optional[VideoRecorder3D] = None
+        if self.record_video:
+            camera_mode = cfg['sim'].get('camera_mode', 'follow')
+            out_path = str(self.out_dir / 'run.mp4')
+            self._recorder = create_recorder(
+                client=self.client,
+                cfg=cfg,
+                mode=camera_mode,
+                out_path=out_path,
+            )
+
     def close(self):
+        if self._recorder is not None:
+            self._recorder.save()
         if p.isConnected(self.client):
             p.disconnect(self.client)
 
     def _build_world(self):
+        world_type = self.cfg['world'].get('type', 'simple')
+
+        if world_type == 'museum':
+            # Museum scene: use museum_builder for rich multi-room layout
+            from .museum_builder import build_museum_world
+            museum_data = build_museum_world(self.client, self.cfg)
+            self._museum_data = museum_data
+            # Use exhibit positions as additional waypoints for pedestrians
+            self._museum_exhibit_positions = museum_data.get('exhibit_positions', [])
+            return
+
+        self._museum_data = None
+        self._museum_exhibit_positions = []
+
         # Obstacles: simple boxes
         for obs in self.cfg['world'].get('obstacles', []):
             pos = obs['pos']
@@ -262,6 +292,10 @@ class SocialNavSim:
         if wps_cfg:
             return [np.array(wp, dtype=float) for wp in wps_cfg]
 
+        # Museum world: use exhibit positions as waypoints
+        if hasattr(self, '_museum_exhibit_positions') and self._museum_exhibit_positions:
+            return [np.array(pos, dtype=float) for pos in self._museum_exhibit_positions]
+
         # Auto-generate: use obstacle positions + grid points
         sx, sy = self.cfg['world']['size_xy']
         wps: List[np.ndarray] = []
@@ -282,6 +316,8 @@ class SocialNavSim:
           - PyBullet multi-body (physics + visual) for each pedestrian.
           - Corresponding FSMPedestrian for behaviour (FSM state machine).
 
+        Uses typed FSM pedestrians (visitor/group/staff) when world type is
+        'museum' or pedestrian count is ≥10, to produce diverse behaviors.
         The two lists (self.pedestrians and self._fsm_peds) are kept in sync:
         index i in both lists refers to the same individual.
         """
@@ -294,17 +330,31 @@ class SocialNavSim:
 
         # ── FSM pedestrian logic (no PyBullet dependency) ────────────────
         sx, sy = self.cfg['world']['size_xy']
-        self._fsm_peds = create_fsm_pedestrians(
-            n=n,
-            world_size=(sx, sy),
-            speed_range=(vmin, vmax),
-            radius=rad,
-            waypoints=self._waypoints,
-            seed=seed,
-            lane_flow=True,
-        )
+        world_type = self.cfg['world'].get('type', 'simple')
 
-        # Visual shape shared across all pedestrians
+        # Use typed pedestrians for museum or when count >= 10
+        use_typed = (world_type == 'museum' or n >= 10)
+        if use_typed:
+            self._fsm_peds = create_typed_fsm_pedestrians(
+                n=n,
+                world_size=(sx, sy),
+                speed_range=(vmin, vmax),
+                radius=rad,
+                waypoints=self._waypoints,
+                seed=seed,
+            )
+        else:
+            self._fsm_peds = create_fsm_pedestrians(
+                n=n,
+                world_size=(sx, sy),
+                speed_range=(vmin, vmax),
+                radius=rad,
+                waypoints=self._waypoints,
+                seed=seed,
+                lane_flow=True,
+            )
+
+        # Shared collision shape (all pedestrians same radius)
         col = p.createCollisionShape(
             p.GEOM_CAPSULE, radius=rad, height=0.9, physicsClientId=self.client
         )
@@ -312,18 +362,9 @@ class SocialNavSim:
             p.GEOM_CAPSULE, radius=rad, length=0.9,
             rgbaColor=[0.0, 0.0, 0.0, 0.0], physicsClientId=self.client
         )
-        torso_vis = p.createVisualShape(
-            p.GEOM_CYLINDER, radius=rad * 0.9, length=0.55,
-            rgbaColor=[0.2, 0.6, 0.9, 1.0], physicsClientId=self.client
-        )
-        head_vis = p.createVisualShape(
-            p.GEOM_SPHERE, radius=rad * 0.75,
-            rgbaColor=[0.95, 0.85, 0.7, 1.0], physicsClientId=self.client
-        )
 
         link_masses = [0.0, 0.0]
         link_collision = [-1, -1]
-        link_visual = [torso_vis, head_vis]
         link_positions = [[0.0, 0.0, 0.65], [0.0, 0.0, 1.10]]
         link_orientations = [
             p.getQuaternionFromEuler([0, 0, 0]),
@@ -341,6 +382,20 @@ class SocialNavSim:
         for fsm_ped in self._fsm_peds:
             x, y = float(fsm_ped.xy[0]), float(fsm_ped.xy[1])
             yaw = float(fsm_ped.yaw)
+
+            # Per-pedestrian torso color (from typed FSM or default blue)
+            torso_color = list(getattr(fsm_ped, 'torso_color', [0.2, 0.6, 0.9, 1.0]))
+
+            torso_vis = p.createVisualShape(
+                p.GEOM_CYLINDER, radius=rad * 0.9, length=0.55,
+                rgbaColor=torso_color, physicsClientId=self.client
+            )
+            head_vis = p.createVisualShape(
+                p.GEOM_SPHERE, radius=rad * 0.75,
+                rgbaColor=[0.95, 0.85, 0.7, 1.0], physicsClientId=self.client
+            )
+            link_visual = [torso_vis, head_vis]
+
             body = p.createMultiBody(
                 baseMass=70.0,
                 baseCollisionShapeIndex=col,
@@ -488,12 +543,20 @@ class SocialNavSim:
             physicsClientId=self.client
         )
 
-    def step(self, v: float, w: float):
+    def step(self, v: float, w: float, step_idx: int = 0):
         self._step_pedestrians()
         self.apply_control(v, w)
         p.stepSimulation(physicsClientId=self.client)
         # Track visited positions for exploration coverage
         self._visited_xys.append(self.robot_pose.xy().copy())
+
+        # Capture video frame if recorder is active
+        if self._recorder is not None:
+            self._recorder.capture_frame(
+                robot_xy=self.robot_pose.xy(),
+                robot_yaw=self.robot_pose.yaw,
+                step_idx=step_idx,
+            )
 
     def get_visited_xys(self) -> List[np.ndarray]:
         """Return visited robot positions (for exploration mode)."""

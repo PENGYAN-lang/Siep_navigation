@@ -1,0 +1,94 @@
+# Museum exploration config — Proactive-SIEP in Nanjing Museum-inspired scene
+# Run: python run_demo.py --museum --planner proactive --siep-variant full --gpu --record --camera all --eval
+# Or:  python run_demo.py --config social_nav3d/configs/paper/museum_explore.yaml \
+#                         --planner proactive --siep-variant full --eval
+
+seed: 42
+sim:
+  dt: 0.05
+  max_steps: 3000
+  gui: false
+  record_video: false
+  camera_mode: follow    # follow | overhead | cinematic
+  out_dir: runs/museum/explore
+  mode: explore          # free exploration (no pre-set goal)
+
+world:
+  type: museum           # triggers museum_builder instead of simple boxes
+  size_xy: [30.0, 25.0]  # museum floor area
+
+robot:
+  start: [11.0, 2.0, 0.0]   # entrance hall
+  goal:  [25.0, 15.0, 0.0]  # wing room (used in goal mode only)
+  radius: 0.25
+  height: 0.30
+  max_v: 1.0
+  max_w: 1.6
+
+lidar:
+  n_az: 180
+  n_el: 3
+  max_range: 10.0
+  el_deg: [-5, 0, 5]
+
+pedestrians:
+  count: 13
+  speed_range: [0.3, 1.0]   # museum visitors walk slower
+  radius: 0.3
+  personal_space:
+    sigma_front: 1.6
+    sigma_side: 0.9
+    sigma_back: 0.7
+  # Exhibit positions matching museum_builder.py pedestals
+  # These are used as FSM waypoints (points of interest)
+  waypoints:
+    # Main gallery exhibits
+    - [8.0,  10.0]
+    - [12.0, 10.0]
+    - [16.0, 10.0]
+    - [10.0, 15.0]
+    - [15.0, 15.0]
+    # Wing room exhibits
+    - [24.0, 11.0]
+    - [27.0, 11.0]
+    - [25.0, 16.0]
+    # Entrance hall exhibits
+    - [9.0,  3.0]
+    - [13.0, 3.0]
+
+planner:
+  # Horizon and sampling — GPU allows larger candidate set
+  horizon_steps: 20
+  n_candidates: 512        # GPU: 512 (vs CPU: 80)
+  plan_dt: 0.05
+  uncertainty_n_samples: 32  # GPU MC-Ensemble samples (vs CPU: 5)
+
+  # GPU evaluation
+  use_gpu: true            # auto-detect CUDA; falls back to CPU
+  use_cbf_humans: true     # include human personal-space in CBF barriers
+
+  # Objective weights (lambda values)
+  lambda_s: 1.0            # social cost weight
+  lambda_u: 0.8            # uncertainty cost weight (increased for museum)
+  lambda_d: 0.3            # dynamics cost weight
+  lambda_e: 1.2            # exploration gain weight (higher for free roam)
+
+  # SIEP force parameters
+  k_goal: 0.0              # no goal force in explore mode
+  sigma_goal: 3.0
+  k_obs: 2.5
+  obs_influence: 2.5
+  k_ps: 2.5                # stronger personal-space in crowded museum
+  k_align: 0.4
+  k_ctx: 0.5
+  k_frontier: 1.5          # stronger frontier attraction for coverage
+  novelty_radius: 2.0      # larger novelty radius for museum rooms
+
+  # Safety barrier (CBF)
+  min_clearance: 0.40      # slightly larger clearance in museum
+  cbf_alpha: 1.0           # CBF decay rate α
+  cbf_jerk_limit: 0.25     # max velocity change per step [m/s]
+
+  # Heading controller
+  k_yaw: 2.5
+  heading_slowdown: 0.5

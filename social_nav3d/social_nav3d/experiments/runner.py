@@ -81,6 +81,14 @@ ABLATION_FLAGS: Dict[str, Dict[str, bool]] = {
         'use_proactive_pred': True,
         'use_barrier': True,
     },
+    # +CBF ablation: full method with formal BarrierCBF safety layer
+    # (use_barrier=True routes through BarrierCBF.project() instead of simple clipping)
+    'cbf': {
+        'use_context_adapt': True,
+        'use_uncertainty_ps': True,
+        'use_proactive_pred': True,
+        'use_barrier': True,
+    },
 }
 
 
@@ -316,9 +324,20 @@ def main() -> int:
                     help='Output directory for results')
     ap.add_argument('--seed', type=int, default=42,
                     help='Base random seed')
+    # GPU flag
+    ap.add_argument('--gpu', dest='gpu', action='store_true', default=None,
+                    help='Force GPU (PyTorch CUDA) batch evaluation.')
+    ap.add_argument('--no-gpu', dest='gpu', action='store_false',
+                    help='Disable GPU, use CPU NumPy path.')
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+
+    # Apply GPU flag to config
+    if args.gpu is not None:
+        cfg.setdefault('planner', {})
+        cfg['planner']['use_gpu'] = args.gpu
+
     out_dir = Path(args.out_dir)
 
     if args.ablation == 'all':

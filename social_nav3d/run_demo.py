@@ -47,10 +47,11 @@ def main() -> int:
     )
     ap.add_argument(
         '--siep-variant', type=str, default='full',
-        choices=['base', 'context', 'uncertainty', 'proactive', 'constrained', 'full'],
+        choices=['base', 'context', 'uncertainty', 'proactive', 'constrained', 'full', 'cbf'],
         help=(
             'Proactive-SIEP ablation variant (only used when --planner proactive): '
-            '"base" disables all innovations; "full" enables all.'
+            '"base" disables all innovations; "full" enables all; '
+            '"cbf" enables all including formal CBF barrier.'
         ),
     )
     ap.add_argument(
@@ -64,7 +65,27 @@ def main() -> int:
     )
     ap.add_argument('--seed', type=int, default=None,
                     help='Override config random seed.')
+    # GPU flags
+    ap.add_argument('--gpu', dest='gpu', action='store_true', default=None,
+                    help='Force GPU (PyTorch CUDA) batch evaluation.')
+    ap.add_argument('--no-gpu', dest='gpu', action='store_false',
+                    help='Disable GPU, use CPU NumPy path.')
+    # Camera / video flags
+    ap.add_argument(
+        '--camera', type=str, default='follow',
+        choices=['follow', 'overhead', 'cinematic', 'all'],
+        help='Video camera mode when --record is set.',
+    )
+    # Museum shortcut
+    ap.add_argument(
+        '--museum', action='store_true',
+        help='Load museum_explore.yaml config (shortcut for museum demo).',
+    )
     args = ap.parse_args()
+
+    # Museum shortcut overrides config path
+    if args.museum:
+        args.config = 'social_nav3d/configs/paper/museum_explore.yaml'
 
     cfg = load_config(args.config)
 
@@ -75,11 +96,20 @@ def main() -> int:
     if args.record:
         cfg.setdefault('sim', {})
         cfg['sim']['record_video'] = True
+        if args.camera != 'all':
+            cfg['sim']['camera_mode'] = args.camera
     if args.mode is not None:
         cfg.setdefault('sim', {})
         cfg['sim']['mode'] = args.mode
     if args.seed is not None:
         cfg['seed'] = args.seed
+    # GPU flag
+    if args.gpu is not None:
+        cfg.setdefault('planner', {})
+        cfg['planner']['use_gpu'] = args.gpu
+
+    # Multi-camera recording: run separate recorders for each mode
+    multi_camera = (args.record and args.camera == 'all')
 
     sim = SocialNavSim(cfg)
     sim.reset()
@@ -102,6 +132,23 @@ def main() -> int:
     else:
         planner = SamplingMPC(cfg)
         print(f'[run_demo] Using Sampling-MPC planner (mode={mode}).')
+
+    # ------------------------------------------------------------------ #
+    # Multi-camera setup (--camera all)                                   #
+    # ------------------------------------------------------------------ #
+    extra_recorders = []
+    if multi_camera:
+        from social_nav3d.env.video_recorder import create_recorder
+        out_dir = Path(cfg['sim'].get('out_dir', 'runs'))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for cam in ['follow', 'overhead', 'cinematic']:
+            rec = create_recorder(
+                client=sim.client, cfg=cfg,
+                mode=cam,
+                out_path=str(out_dir / f'run_{cam}.mp4'),
+            )
+            if rec is not None:
+                extra_recorders.append((cam, rec))
 
     # ------------------------------------------------------------------ #
     # Metrics accumulator (for --eval)                                    #
@@ -135,8 +182,14 @@ def main() -> int:
             plan_goal = goal_xy if goal_xy is not None else state.xy()
             v, w = planner.plan(state, plan_goal, sim.dt, lidar_min, peds)
 
-        sim.step(v, w)
+        sim.step(v, w, step_idx=k)
         traj.append([state.x, state.y])
+
+        # Extra camera recorders (--camera all)
+        for _cam, rec in extra_recorders:
+            rec.capture_frame(
+                robot_xy=state.xy(), robot_yaw=state.yaw, step_idx=k
+            )
 
         # Collect metrics
         if args.eval:
@@ -152,6 +205,12 @@ def main() -> int:
             print(f'[run_demo] Goal reached at step {k}.')
             ep_metrics.reached_goal = True
             break
+
+    # ------------------------------------------------------------------ #
+    # Save extra recorders (--camera all)                                 #
+    # ------------------------------------------------------------------ #
+    for _cam, rec in extra_recorders:
+        rec.save()
 
     # ------------------------------------------------------------------ #
     # Print metrics                                                        #

@@ -5,6 +5,9 @@ scipy>=1.10
 imageio>=2.31
 imageio-ffmpeg>=0.4.9
 pydantic>=2.5
-# Optional (future learning-based prediction / policies)
-# torch is not pinned here because CUDA builds vary; see README for install command.
+# PyTorch for GPU-accelerated batch trajectory evaluation.
+# Install the version matching your CUDA (see README for commands).
+# CPU-only: pip install torch>=2.0 --index-url https://download.pytorch.org/whl/cpu
+# CUDA 12.x: pip install torch>=2.0 --index-url https://download.pytorch.org/whl/cu121
+torch>=2.0
 PyYAML>=6.0
