@@ -1,0 +1,137 @@
+# Gallery Museum scenario for SIEP social navigation
+# 40 x 30 m indoor environment with three gallery rooms, a central atrium,
+# corridors, and exhibit pedestals.  Pedestrians use the FSM behaviour model
+# to wander between exhibit interest points.
+#
+# Run with:
+#   python run_demo.py --config social_nav3d/configs/gallery_museum.yaml \
+#       --planner siep --mode explore --siep-variant full --eval
+#   python run_demo.py --config social_nav3d/configs/gallery_museum.yaml \
+#       --planner siep --mode goal   --siep-variant full --eval
+
+seed: 42
+
+sim:
+  dt: 0.05
+  max_steps: 3000
+  gui: false
+  record_video: false
+  out_dir: runs/museum
+
+world:
+  size_xy: [40.0, 30.0]
+
+  # ── Gallery walls / room dividers (thin tall boxes) ─────────────────────
+  # Each entry: pos [x, y, z_centre], half_extents [hx, hy, hz]
+  obstacles:
+    # Left gallery north wall
+    - {pos: [10.0, 15.0, 1.0], half_extents: [0.15, 7.0, 1.0]}
+    # Left gallery south wall (gap for doorway)
+    - {pos: [10.0, 4.0,  1.0], half_extents: [0.15, 4.0, 1.0]}
+    # Right gallery north wall
+    - {pos: [28.0, 15.0, 1.0], half_extents: [0.15, 7.0, 1.0]}
+    # Right gallery south wall (gap for doorway)
+    - {pos: [28.0, 4.0,  1.0], half_extents: [0.15, 4.0, 1.0]}
+    # Central upper partition
+    - {pos: [19.0, 24.0, 1.0], half_extents: [4.5, 0.15, 1.0]}
+    # Left exhibit pedestal A
+    - {pos: [5.0,  20.0, 0.5], half_extents: [0.4, 0.4, 0.5]}
+    # Left exhibit pedestal B
+    - {pos: [5.0,  10.0, 0.5], half_extents: [0.4, 0.4, 0.5]}
+    # Central atrium pillar 1
+    - {pos: [16.0, 15.0, 1.0], half_extents: [0.3, 0.3, 1.0]}
+    # Central atrium pillar 2
+    - {pos: [22.0, 15.0, 1.0], half_extents: [0.3, 0.3, 1.0]}
+    # Right exhibit pedestal A
+    - {pos: [33.0, 20.0, 0.5], half_extents: [0.4, 0.4, 0.5]}
+    # Right exhibit pedestal B
+    - {pos: [33.0, 10.0, 0.5], half_extents: [0.4, 0.4, 0.5]}
+    # Rear gallery east partition (with doorway gap in middle)
+    - {pos: [19.0,  2.0, 1.0], half_extents: [6.0, 0.15, 1.0]}
+
+  # ── Exhibit / interest points for pedestrian FSM ──────────────────────
+  # Pedestrians walk between these points (exhibit fronts, benches, etc.)
+  interest_points:
+    - [5.0,  21.5]   # Exhibit A (left gallery)
+    - [5.0,  18.5]
+    - [5.0,  11.5]   # Exhibit B (left gallery)
+    - [5.0,   8.5]
+    - [14.0, 25.0]   # Bench / rest area (upper atrium)
+    - [19.0, 25.5]
+    - [24.0, 25.0]
+    - [19.0, 14.0]   # Central atrium floor
+    - [19.0, 17.0]
+    - [33.0, 21.5]   # Exhibit A (right gallery)
+    - [33.0, 18.5]
+    - [33.0, 11.5]   # Exhibit B (right gallery)
+    - [33.0,  8.5]
+    - [9.0,  15.0]   # Left corridor midpoint
+    - [29.0, 15.0]   # Right corridor midpoint
+
+robot:
+  start: [2.0, 2.0, 0.785]     # near entrance, facing diagonally
+  goal:  [36.0, 26.0, 0.0]     # far corner of right gallery
+  radius: 0.25
+  height: 0.30
+  max_v: 1.2
+  max_w: 1.8
+
+lidar:
+  n_az: 180
+  n_el: 3
+  max_range: 8.0
+  el_deg: [-5, 0, 5]
+
+pedestrians:
+  count: 14
+  speed_range: [0.3, 1.1]    # random individual base speed (assigned at spawn)
+  radius: 0.3
+  personal_space:
+    sigma_front: 1.6
+    sigma_side: 0.9
+    sigma_back: 0.7
+
+# SIEP planner parameters – extended with CA-SIEP / UMPS / GF fields
+planner:
+  # Base SIEP weights
+  k_goal: 1.0
+  sigma_goal: 5.0
+  k_obs: 2.5
+  obs_influence: 2.5
+  k_ps: 2.0
+  ps_horizon: 1.5
+  ps_dt: 0.1
+  k_align: 0.3
+  align_radius: 3.0
+  align_cone_deg: 60.0
+  # Heading controller
+  k_yaw: 2.5
+  heading_slowdown: 0.5
+  # CA-SIEP parameters
+  context_radius: 4.0
+  density_ps_gain: 1.5
+  density_threshold: 0.15
+  density_goal_decay: 0.5
+  face_ps_gain: 0.5
+  lambda_min: 0.3
+  lambda_max: 3.0
+  # UMPS parameters
+  uncertainty_gain: 1.2
+  max_uncertainty: 0.8
+  # Group-force parameters
+  group_proximity: 2.0
+  group_heading_thresh: 0.5
+  k_group: 1.5
+  group_sigma_scale: 1.4
+  # Frontier exploration
+  k_frontier: 1.0
+  novelty_radius: 2.5
+  frontier_random_weight: 0.08
+  # MPC fallback (unused when --planner siep)
+  horizon_s: 2.0
+  n_samples: 160
+  w_goal: 1.0
+  w_smooth: 0.1
+  w_obstacle: 3.0
+  w_social: 2.5
+  min_clearance: 0.35

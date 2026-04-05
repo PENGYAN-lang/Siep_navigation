@@ -1,9 +1,10 @@
 from __future__ import annotations
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum, auto
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pybullet as p
@@ -11,6 +12,26 @@ import pybullet_data
 
 from ..utils.geometry import Pose2, integrate_diff_drive
 from ..utils.social import PersonalSpace
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FSM pedestrian behaviour constants
+# ─────────────────────────────────────────────────────────────────────────────
+_DWELL_TIME_MIN: float = 5.0    # [s] minimum exhibit dwell time
+_DWELL_TIME_MAX: float = 15.0   # [s] maximum exhibit dwell time
+_SPEED_NOISE_STDDEV: float = 0.05   # Gaussian noise on base_speed (5 % std dev)
+_DECELERATION_DISTANCE: float = 3.0  # [m] radius at which pedestrian starts slowing
+
+
+class PedBehaviorState(Enum):
+    """States in the pedestrian finite-state machine (FSM).
+
+    WANDER  – choose a new interest point and transition to WALK_TO.
+    WALK_TO – walk toward the current target (exhibit or waypoint).
+    VIEWING – stand at the current target for a random dwell time.
+    """
+    WANDER = auto()
+    WALK_TO = auto()
+    VIEWING = auto()
 
 
 @dataclass
@@ -21,6 +42,12 @@ class Pedestrian:
     yaw: float
     vel: np.ndarray
     ps: PersonalSpace
+    # ── FSM fields (default values keep backwards compatibility) ──────────
+    state: PedBehaviorState = PedBehaviorState.WANDER
+    target_xy: Optional[np.ndarray] = None
+    view_timer: float = 0.0          # remaining dwell time [s]
+    base_speed: float = 0.8          # individual cruise speed [m/s]
+    arrive_radius: float = 1.2       # "close enough" to target [m]
 
 
 @dataclass
@@ -68,11 +95,47 @@ class SocialNavSim:
         self.robot_radius = float(cfg['robot']['radius'])
 
         self.pedestrians: List[Pedestrian] = []
+        # Interest points for pedestrian FSM (exhibit locations or waypoints)
+        self._interest_points: List[np.ndarray] = self._build_interest_points()
+        self._ped_rng = np.random.default_rng(int(self.cfg.get('seed', 0)) + 1)
         self._spawn_pedestrians()
 
     def close(self):
         if p.isConnected(self.client):
             p.disconnect(self.client)
+
+    def _build_interest_points(self) -> List[np.ndarray]:
+        """Build a list of pedestrian interest / waypoints for the FSM.
+
+        Priority order:
+        1. Explicit ``interest_points`` list in the config (e.g. gallery_museum.yaml).
+        2. Obstacle centres from the world config (pedestrians naturally gather
+           near exhibits / furniture).
+        3. Fallback: a grid of points inside the world boundary.
+        """
+        sx, sy = self.cfg['world']['size_xy']
+
+        # 1. Explicit list from config
+        if 'interest_points' in self.cfg.get('world', {}):
+            pts = []
+            for ip in self.cfg['world']['interest_points']:
+                pts.append(np.array([float(ip[0]), float(ip[1])], dtype=float))
+            if pts:
+                return pts
+
+        # 2. Obstacle centres (xy only)
+        pts = []
+        for obs in self.cfg['world'].get('obstacles', []):
+            pts.append(np.array([float(obs['pos'][0]), float(obs['pos'][1])], dtype=float))
+
+        # 3. Fallback grid
+        if len(pts) < 4:
+            for fx in [0.25, 0.5, 0.75]:
+                for fy in [0.25, 0.5, 0.75]:
+                    pts.append(np.array([fx * sx, fy * sy], dtype=float))
+
+        return pts
+
 
     def _build_world(self):
         # Obstacles: simple boxes
@@ -323,7 +386,12 @@ class SocialNavSim:
                     xy=np.array([x, y], dtype=float),
                     yaw=yaw,
                     vel=vel,
-                    ps=ps
+                    ps=ps,
+                    state=PedBehaviorState.WANDER,
+                    target_xy=None,
+                    view_timer=0.0,
+                    base_speed=speed,
+                    arrive_radius=1.2,
                 )
             )
 
@@ -339,22 +407,76 @@ class SocialNavSim:
         return self.robot_pose.copy()
 
     def _step_pedestrians(self):
+        """Advance all pedestrians by one time step using the FSM behaviour model.
+
+        Each pedestrian cycles through three states:
+
+        WANDER  → randomly selects a new interest point as target.
+        WALK_TO → moves toward the target with a speed that has small Gaussian
+                  noise added each step (realistic speed variation).  Social
+                  force avoidance of world boundaries is applied.
+        VIEWING → stands still for a random dwell time (5–15 s), then returns
+                  to WANDER.
+
+        This replaces the original bounce-on-walls pattern with museum-browsing
+        behaviour: pedestrians walk to exhibits, stop to "look", then move on.
+        """
         sx, sy = self.cfg['world']['size_xy']
-        xmin, ymin, xmax, ymax = 0.5, 0.5, sx - 0.5, sy - 0.5
+        xmin, ymin, xmax, ymax = 0.8, 0.8, sx - 0.8, sy - 0.8
 
         for ped in self.pedestrians:
-            ped.xy = ped.xy + ped.vel * self.dt
+            if ped.state == PedBehaviorState.WANDER:
+                # Pick a random interest point as the next target
+                if self._interest_points:
+                    idx = int(self._ped_rng.integers(0, len(self._interest_points)))
+                    ped.target_xy = self._interest_points[idx].copy()
+                else:
+                    tx = float(self._ped_rng.uniform(xmin, xmax))
+                    ty = float(self._ped_rng.uniform(ymin, ymax))
+                    ped.target_xy = np.array([tx, ty], dtype=float)
+                ped.state = PedBehaviorState.WALK_TO
 
-            # bounce on bounds
-            if ped.xy[0] < xmin or ped.xy[0] > xmax:
-                ped.vel[0] *= -1
-                ped.xy[0] = np.clip(ped.xy[0], xmin, xmax)
-            if ped.xy[1] < ymin or ped.xy[1] > ymax:
-                ped.vel[1] *= -1
-                ped.xy[1] = np.clip(ped.xy[1], ymin, ymax)
+            elif ped.state == PedBehaviorState.WALK_TO:
+                direction = ped.target_xy - ped.xy
+                dist = float(np.linalg.norm(direction))
 
-            ped.yaw = math.atan2(ped.vel[1], ped.vel[0] + 1e-9)
+                if dist < ped.arrive_radius:
+                    # Arrived: start viewing
+                    dwell = float(self._ped_rng.uniform(_DWELL_TIME_MIN, _DWELL_TIME_MAX))
+                    ped.view_timer = dwell
+                    ped.vel = np.zeros(2, dtype=float)
+                    ped.state = PedBehaviorState.VIEWING
+                else:
+                    # Approach speed: slower when close to target (decelerate)
+                    approach_factor = min(1.0, dist / _DECELERATION_DISTANCE)
+                    # Gaussian speed noise for realism
+                    noise = float(self._ped_rng.normal(0.0, _SPEED_NOISE_STDDEV))
+                    speed = ped.base_speed * approach_factor * (1.0 + noise)
+                    speed = max(0.1, speed)
+                    ped.vel = direction / dist * speed
 
+                    # Soft boundary repulsion (keeps peds inside world)
+                    bx = max(0.0, xmin - ped.xy[0]) - max(0.0, ped.xy[0] - xmax)
+                    by = max(0.0, ymin - ped.xy[1]) - max(0.0, ped.xy[1] - ymax)
+                    ped.vel += np.array([bx, by], dtype=float) * 0.5
+
+                # Update heading based on velocity
+                spd = float(np.linalg.norm(ped.vel))
+                if spd > 0.05:
+                    ped.yaw = math.atan2(ped.vel[1], ped.vel[0])
+
+                # Move
+                ped.xy = ped.xy + ped.vel * self.dt
+                ped.xy[0] = float(np.clip(ped.xy[0], xmin, xmax))
+                ped.xy[1] = float(np.clip(ped.xy[1], ymin, ymax))
+
+            elif ped.state == PedBehaviorState.VIEWING:
+                ped.vel = np.zeros(2, dtype=float)
+                ped.view_timer -= self.dt
+                if ped.view_timer <= 0.0:
+                    ped.state = PedBehaviorState.WANDER
+
+            # Sync physics body
             p.resetBasePositionAndOrientation(
                 ped.body_id,
                 [float(ped.xy[0]), float(ped.xy[1]), 0.9 / 2 + ped.radius],
