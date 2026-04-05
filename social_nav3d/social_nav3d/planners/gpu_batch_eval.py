@@ -143,6 +143,11 @@ class BatchSIEPEvaluator:
         # Grid step matches the novelty radius (same as ProactiveSIEP)
         self._novelty_grid_step: float = max(self.novelty_radius, 1e-3)
 
+        # Endpoint-distance bonus weight (encourages reaching further from start)
+        self._endpoint_bonus_w: float = float(pcfg.get("endpoint_bonus_w", 0.5))
+        # Room-transition bonus (large reward for crossing doorways into new rooms)
+        self._room_bonus_w: float = float(pcfg.get("room_bonus_w", 5.0))
+
         # ── Uncertainty estimation ────────────────────────────────────────
         #    Default: 32 on GPU, 5 on CPU (matches ProactiveSIEP behaviour)
         default_S = 32 if self.device.type == "cuda" else 5
@@ -821,33 +826,84 @@ class BatchSIEPEvaluator:
                 novel = np.ones((n_cand, H), dtype=bool)
 
             gain = novel.sum(axis=1).astype(np.float32)  # (n_cand,)
-            return torch.tensor(gain, dtype=dtype, device=dev)
+            gain_t = torch.tensor(gain, dtype=dtype, device=dev)
+        else:
+            # ── Fallback: distance-based check (last 100 visited positions) ──
+            if not visited_xys:
+                # Every position is novel — gain = H (all steps after t=0)
+                gain_t = torch.full(
+                    (n_cand,), float(H), dtype=dtype, device=dev
+                )
+            else:
+                # Use last 100 visited positions for efficiency
+                recent = visited_xys[-100:]
+                visited_t = torch.tensor(
+                    np.stack(recent), dtype=dtype, device=dev
+                )  # (V, 2)
 
-        # ── Fallback: distance-based check (last 100 visited positions) ──
-        if not visited_xys:
-            # Every position is novel — gain = H (all steps after t=0)
-            return torch.full(
-                (n_cand,), float(H), dtype=dtype, device=dev
-            )
+                # robot_xy[:, 1:, :]: (n_cand, H, 2) — skip t=0
+                traj = robot_xy[:, 1:, :]   # (n_cand, H, 2)
 
-        # Use last 100 visited positions for efficiency
-        recent = visited_xys[-100:]
-        visited_t = torch.tensor(
-            np.stack(recent), dtype=dtype, device=dev
-        )  # (V, 2)
+                # Pairwise distances: (n_cand, H, V)
+                diff = traj.unsqueeze(2) - visited_t.view(1, 1, -1, 2)
+                dists = diff.norm(dim=-1)   # (n_cand, H, V)
 
-        # robot_xy[:, 1:, :]: (n_cand, H, 2) — skip t=0
-        traj = robot_xy[:, 1:, :]   # (n_cand, H, 2)
+                # A position is novel if the minimum distance to any visited point
+                # exceeds novelty_radius
+                min_dist = dists.min(dim=-1).values  # (n_cand, H)
+                novel = (min_dist > self.novelty_radius).float()
+                gain_t = novel.sum(dim=1)  # (n_cand,)
 
-        # Pairwise distances: (n_cand, H, V)
-        diff = traj.unsqueeze(2) - visited_t.view(1, 1, -1, 2)
-        dists = diff.norm(dim=-1)   # (n_cand, H, V)
+        # ── Endpoint-distance bonus ───────────────────────────────────────
+        # Reward candidates that reach far from the current position.
+        # This overcomes the weak signal when all trajectories stay local.
+        endpoint = robot_xy[:, -1, :]   # (n_cand, 2)
+        start = robot_xy[:, 0, :]       # (n_cand, 2)
+        endpoint_bonus = torch.norm(endpoint - start, dim=-1)  # (n_cand,)
+        gain_t = gain_t + self._endpoint_bonus_w * endpoint_bonus
 
-        # A position is novel if the minimum distance to any visited point
-        # exceeds novelty_radius
-        min_dist = dists.min(dim=-1).values  # (n_cand, H)
-        novel = (min_dist > self.novelty_radius).float()
-        return novel.sum(dim=1)  # (n_cand,)
+        # ── Room-transition bonus ─────────────────────────────────────────
+        # Give a large bonus when a trajectory crosses a museum doorway,
+        # rewarding the robot for moving into unexplored rooms.
+        #
+        # Museum doorway thresholds (see museum_builder.py):
+        #   y = 8.0  – entrance hall ↔ main gallery (horizontal doorway)
+        #   y = 26.0 – main gallery ↔ top corridor  (horizontal doorway)
+        #   x = 24.0 – main gallery ↔ wing room     (vertical doorway)
+        if self._room_bonus_w > 0.0:
+            # robot_xy shape: (n_cand, H+1, 2)
+            traj_all = robot_xy           # (n_cand, H+1, 2)
+            sx0 = start[:, 0]            # (n_cand,)
+            sy0 = start[:, 1]            # (n_cand,)
+
+            # Check any trajectory point for crossing (start vs. full traj)
+            traj_x = traj_all[:, :, 0]  # (n_cand, H+1)
+            traj_y = traj_all[:, :, 1]  # (n_cand, H+1)
+
+            # y=8: entrance hall → main gallery
+            cross_y8 = (
+                (sy0 < 8.0).unsqueeze(1) & (traj_y > 8.0)
+                | (sy0 > 8.0).unsqueeze(1) & (traj_y < 8.0)
+            ).any(dim=1)  # (n_cand,)
+
+            # y=26: main gallery → top corridor
+            cross_y26 = (
+                (sy0 < 26.0).unsqueeze(1) & (traj_y > 26.0)
+                | (sy0 > 26.0).unsqueeze(1) & (traj_y < 26.0)
+            ).any(dim=1)  # (n_cand,)
+
+            # x=24: main gallery → wing room
+            cross_x24 = (
+                (sx0 < 24.0).unsqueeze(1) & (traj_x > 24.0)
+                | (sx0 > 24.0).unsqueeze(1) & (traj_x < 24.0)
+            ).any(dim=1)  # (n_cand,)
+
+            room_bonus = (
+                cross_y8.float() + cross_y26.float() + cross_x24.float()
+            ) * self._room_bonus_w
+            gain_t = gain_t + room_bonus
+
+        return gain_t
 
     def _compute_frontier_forces(
         self,

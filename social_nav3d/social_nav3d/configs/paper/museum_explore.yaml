@@ -6,7 +6,7 @@
 seed: 42
 sim:
   dt: 0.05
-  max_steps: 5000
+  max_steps: 8000
   gui: false
   record_video: true
   camera_mode: follow    # follow | overhead | cinematic
@@ -32,27 +32,29 @@ lidar:
   el_deg: [-5, 0, 5]
 
 pedestrians:
-  count: 9                    # reduced — larger scene keeps density comfortable
-  speed_range: [0.2, 0.5]    # realistic museum visitor pace
+  count: 8                    # enough for visible social interactions
+  speed_range: [0.3, 0.6]    # fast enough to be interesting, not overwhelming
   radius: 0.3
   personal_space:
     sigma_front: 1.6
     sigma_side: 0.9
     sigma_back: 0.7
-  # Exhibit positions matching museum_builder.py pedestals + corridor junctions
+  # Waypoints cover all rooms AND doorway areas to force visible encounters
   waypoints:
-    # Main gallery exhibits
+    # Main gallery exhibits (pedestrians browse here)
     - [10.0, 14.0]
     - [16.0, 14.0]
     - [10.0, 21.0]
     - [16.0, 21.0]
+    # Doorway areas (force robot–pedestrian encounters near thresholds)
+    - [14.0,  8.5]   # entrance–gallery door
+    - [24.5, 18.0]   # gallery–wing door
+    - [14.0, 25.5]   # gallery–top corridor door
     # Wing room exhibits
     - [28.0, 14.0]
     - [34.0, 14.0]
     - [30.0, 20.0]
-    # Entrance hall
-    - [14.0,  4.0]
-    # Top corridor junctions (encourage corridor traversal)
+    # Top corridor
     - [14.0, 30.0]
     - [30.0, 30.0]
 
@@ -60,34 +62,34 @@ planner:
   # Horizon and sampling — GPU allows larger candidate set
   horizon_steps: 20
   n_candidates: 512        # GPU: 512 (vs CPU: 80)
-  plan_dt: 0.05
+  plan_dt: 0.20            # longer effective horizon: 20 × 0.2 s = 4 s (~4 m reach)
   uncertainty_n_samples: 32  # GPU MC-Ensemble samples (vs CPU: 5)
 
   # GPU evaluation
   use_gpu: true            # auto-detect CUDA; falls back to CPU
-  use_cbf_humans: true     # include human personal-space in CBF barriers
+  use_cbf_humans: false    # disable CBF for humans to allow faster manoeuvring
 
   # Objective weights (lambda values)
-  lambda_s: 1.0            # social cost weight
-  lambda_u: 0.8            # uncertainty cost weight
-  lambda_d: 0.3            # dynamics cost weight
-  lambda_e: 5.0            # exploration gain weight — dominant term in explore mode
+  lambda_s: 0.5            # moderate social cost (visible avoidance)
+  lambda_u: 0.3            # uncertainty cost weight
+  lambda_d: 0.2            # dynamics cost weight
+  lambda_e: 12.0           # very strong exploration drive — dominant term
 
   # SIEP force parameters
   k_goal: 0.0              # no goal force in explore mode
   sigma_goal: 3.0
   k_obs: 1.5               # reduced obstacle repulsion to avoid tight-space traps
   obs_influence: 1.5       # reduced influence radius — less braking near walls
-  k_ps: 2.5                # personal-space repulsion in museum
+  k_ps: 1.5                # moderate personal-space repulsion
   k_align: 0.4
   k_ctx: 0.5
   k_frontier: 2.0          # frontier pull (used in CPU path)
-  novelty_radius: 2.0      # grid cell size for visited-area tracking
+  novelty_radius: 1.5      # grid cell size for visited-area tracking
 
   # Safety barrier (CBF)
-  min_clearance: 0.25      # reduced minimum obstacle clearance
+  min_clearance: 0.20      # reduced minimum obstacle clearance
   cbf_alpha: 1.0           # CBF decay rate α
-  cbf_jerk_limit: 0.8      # relaxed max velocity change per step [m/s]
+  cbf_jerk_limit: 1.0      # allow faster acceleration [m/s per step]
 
   # Heading controller
   k_yaw: 2.5

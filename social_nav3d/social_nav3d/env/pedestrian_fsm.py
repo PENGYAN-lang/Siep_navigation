@@ -80,6 +80,10 @@ GROUP_FOLLOW_OFFSET: float = 0.8   # [m] follow distance behind leader
 VISITOR_DWELL_MIN: float = 8.0    # [s]
 VISITOR_DWELL_MAX: float = 20.0   # [s]
 
+# Stuck-detection thresholds
+STUCK_CHECK_INTERVAL: int = 100   # steps between stuck checks
+STUCK_DIST_THRESHOLD: float = 0.5 # [m] min movement in STUCK_CHECK_INTERVAL steps
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FSM Pedestrian dataclass
@@ -99,6 +103,9 @@ class FSMPedestrian:
     fsm_state   : current FSM state
     view_timer  : countdown for VIEWING state [s]
     radius      : collision radius [m]
+    prev_xy     : last valid (non-wall-colliding) position [m]
+    stuck_steps : steps since last significant movement (stuck detection)
+    _stuck_ref_xy : reference position for stuck detection
     """
     xy: np.ndarray
     yaw: float
@@ -116,10 +123,18 @@ class FSMPedestrian:
     leader_idx: Optional[int] = None             # for GROUP type: index of leader ped
     patrol_waypoints: Optional[List[np.ndarray]] = field(default=None, repr=False)  # for STAFF
     patrol_idx: int = 0                          # current patrol waypoint index
+    # Wall-stuck recovery
+    prev_xy: Optional[np.ndarray] = field(default=None, repr=False)
+    stuck_steps: int = 0
+    _stuck_ref_xy: Optional[np.ndarray] = field(default=None, repr=False)
 
     def __post_init__(self):
         if self._rng is None:
             self._rng = np.random.default_rng()
+        if self.prev_xy is None:
+            self.prev_xy = self.xy.copy()
+        if self._stuck_ref_xy is None:
+            self._stuck_ref_xy = self.xy.copy()
 
 
 def create_fsm_pedestrians(
@@ -431,6 +446,9 @@ def step_fsm_pedestrians(
         _fsm_transition(ped, waypoints, dt)
         _fsm_velocity_update(ped, peds, robot_xy, robot_radius, dt)
 
+        # Save last valid position before attempting move
+        ped.prev_xy = ped.xy.copy()
+
         # Integrate position with wall collision sliding
         proposed = ped.xy + ped.vel * dt
 
@@ -450,12 +468,37 @@ def step_fsm_pedestrians(
                 proposed = proposed_y
                 ped.vel[0] = 0.0
             else:
-                # Fully blocked — stop and pick new target
-                proposed = ped.xy.copy()
+                # Fully blocked — revert to previous valid position, stop, and
+                # immediately pick a new waypoint to escape the corner.
+                proposed = ped.prev_xy.copy()
                 ped.vel[:] = 0.0
                 ped.fsm_state = PedFSMState.WANDER
 
         ped.xy = proposed
+
+        # ── Stuck detection ──────────────────────────────────────────────
+        # If the pedestrian hasn't moved STUCK_DIST_THRESHOLD in the last
+        # STUCK_CHECK_INTERVAL steps, forcefully teleport it to a random
+        # waypoint that is known to be in open space.
+        ped.stuck_steps += 1
+        if ped.stuck_steps >= STUCK_CHECK_INTERVAL:
+            dist_moved = float(np.linalg.norm(ped.xy - ped._stuck_ref_xy))
+            if dist_moved < STUCK_DIST_THRESHOLD:
+                if waypoints:
+                    # Teleport to a random waypoint in open space
+                    wp_idx = ped._rng.integers(0, len(waypoints))
+                    ped.xy = waypoints[wp_idx].copy()
+                else:
+                    # No waypoints — scatter to a random position near world centre
+                    ped.xy = np.array([
+                        float(ped._rng.uniform(xmin + 1.0, xmax - 1.0)),
+                        float(ped._rng.uniform(ymin + 1.0, ymax - 1.0)),
+                    ], dtype=float)
+                ped.vel[:] = 0.0
+                ped.fsm_state = PedFSMState.WANDER
+            # Reset stuck counter regardless
+            ped.stuck_steps = 0
+            ped._stuck_ref_xy = ped.xy.copy()
 
         # Boundary reflection
         if ped.xy[0] < xmin or ped.xy[0] > xmax:
