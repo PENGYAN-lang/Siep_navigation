@@ -31,7 +31,7 @@ WALL_HALF_T: float = 0.15          # half-thickness of every wall segment
 WALL_COLOR: list[float] = [0.85, 0.82, 0.78, 1.0]   # museum beige
 PEDESTAL_COLOR: list[float] = [0.55, 0.45, 0.35, 1.0]  # dark wood brown
 PEDESTAL_HALF_EXTENTS: list[float] = [0.25, 0.25, 0.4]  # 0.5 m × 0.5 m × 0.8 m tall
-DOORWAY_HALF_GAP: float = 1.25     # half of the 2.5 m doorway opening
+DOORWAY_HALF_GAP: float = 2.0      # half of the 4.0 m doorway opening
 
 # Pre-defined exhibit positions (x, y) – used as pedestrian waypoints too.
 # Reduced set for the expanded scene (8 pedestals, more spread out).

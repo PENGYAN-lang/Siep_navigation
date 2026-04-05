@@ -310,6 +310,7 @@ class ProactiveSIEP:
                 lidar_dists, lidar_angles_world,
                 ped_raw, ped_pss, cw_base, unc_scales,
                 self.explore_mode, self._visited_xys,
+                visited_cells=self._visited_cells,
             )
             best_u = candidates[best_idx]
         else:
