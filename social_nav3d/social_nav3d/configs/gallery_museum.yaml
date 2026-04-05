@@ -1,0 +1,139 @@
+# Gallery Museum configuration for SocialNav3D
+# ~40×30 m floor plan modelling a realistic museum wing.
+#
+# Layout (bird's-eye view):
+#
+#   ┌──────────────────────────────────────────┐
+#   │  Room A (West)  │corridor│  Room B (East) │
+#   │  (art displays) │        │  (sculptures)  │
+#   ├──────────┬───────┘        └───────┬────────┤
+#   │  Hall    │   Central Corridor      │ Room C │
+#   │ (entry)  │                         │(north) │
+#   └──────────┴─────────────────────────┴────────┘
+#
+# Units: metres.  Robot start is near the entrance (south-west corner).
+
+seed: 42
+
+sim:
+  dt: 0.05
+  max_steps: 4000
+  gui: false
+  record_video: false
+  out_dir: runs
+
+world:
+  # Total floor area
+  size_xy: [40.0, 30.0]
+
+  # ── Outer perimeter walls ──────────────────────────────────────────────
+  # Each wall: pos = centre, half_extents = [half-length, half-thickness, half-height]
+  walls:
+    # South outer wall (bottom edge, y≈0)
+    - {pos: [20.0,  0.2, 1.5], half_extents: [20.0, 0.2, 1.5]}
+    # North outer wall (top edge, y≈30)
+    - {pos: [20.0, 29.8, 1.5], half_extents: [20.0, 0.2, 1.5]}
+    # West outer wall (left edge, x≈0)
+    - {pos: [ 0.2, 15.0, 1.5], half_extents: [0.2, 15.0, 1.5]}
+    # East outer wall (right edge, x≈40)
+    - {pos: [39.8, 15.0, 1.5], half_extents: [0.2, 15.0, 1.5]}
+
+    # ── Interior partition walls ─────────────────────────────────────────
+    # West room divider (x≈13): south half — doorway gap at y=8..10
+    - {pos: [13.0,  4.5, 1.5], half_extents: [0.2, 4.5, 1.5]}
+    - {pos: [13.0, 11.0, 1.5], half_extents: [0.2, 4.0, 1.5]}   # above doorway
+
+    # West room divider: north half — doorway gap at y=18..20
+    - {pos: [13.0, 15.5, 1.5], half_extents: [0.2, 2.5, 1.5]}
+    - {pos: [13.0, 23.5, 1.5], half_extents: [0.2, 6.5, 1.5]}
+
+    # East room divider (x≈27): south half — doorway gap at y=8..10
+    - {pos: [27.0,  4.5, 1.5], half_extents: [0.2, 4.5, 1.5]}
+    - {pos: [27.0, 11.0, 1.5], half_extents: [0.2, 4.0, 1.5]}
+
+    # East room divider: north half — doorway gap at y=18..20
+    - {pos: [27.0, 15.5, 1.5], half_extents: [0.2, 2.5, 1.5]}
+    - {pos: [27.0, 23.5, 1.5], half_extents: [0.2, 6.5, 1.5]}
+
+    # Short north room divider (separates corridor from Room C)  — doorway gap at x=32..34
+    - {pos: [20.0, 20.0, 1.5], half_extents: [7.0, 0.2, 1.5]}   # central north wall
+    - {pos: [36.5, 20.0, 1.5], half_extents: [3.5, 0.2, 1.5]}   # east segment
+
+  # ── Exhibit pedestals / display cases (rectangular boxes) ──────────────
+  obstacles:
+    # Room A (West, x=0..13, y=0..30) — painting pedestals
+    - {pos: [ 4.0,  5.0, 0.6], half_extents: [0.4, 0.4, 0.6]}
+    - {pos: [ 8.0,  5.0, 0.6], half_extents: [0.4, 0.4, 0.6]}
+    - {pos: [ 4.0, 10.0, 0.6], half_extents: [0.4, 0.4, 0.6]}
+    - {pos: [ 8.0, 25.0, 0.6], half_extents: [0.4, 0.4, 0.6]}
+    - {pos: [ 4.0, 25.0, 0.6], half_extents: [0.4, 0.4, 0.6]}
+    - {pos: [ 8.0, 15.0, 0.6], half_extents: [0.6, 1.2, 0.6]}   # long display case
+
+    # Central corridor (x=13..27) — info kiosks / benches
+    - {pos: [16.0,  8.0, 0.5], half_extents: [0.5, 0.3, 0.5]}
+    - {pos: [24.0,  8.0, 0.5], half_extents: [0.5, 0.3, 0.5]}
+    - {pos: [20.0, 15.0, 0.4], half_extents: [1.5, 0.3, 0.4]}   # central bench
+
+    # Room B (East, x=27..40, y=0..30) — sculpture plinths
+    - {pos: [31.0,  5.0, 0.6], half_extents: [0.5, 0.5, 0.6]}
+    - {pos: [36.0,  5.0, 0.6], half_extents: [0.5, 0.5, 0.6]}
+    - {pos: [31.0, 10.0, 0.6], half_extents: [0.5, 0.5, 0.6]}
+    - {pos: [36.0, 12.0, 0.6], half_extents: [0.4, 0.8, 0.6]}
+
+    # Room C (north, x=27..40, y=20..30)
+    - {pos: [31.0, 24.0, 0.6], half_extents: [0.4, 0.4, 0.6]}
+    - {pos: [36.0, 25.0, 0.6], half_extents: [0.4, 0.4, 0.6]}
+
+  ramps: []
+
+robot:
+  # Near the entrance (south-west)
+  start: [2.0, 2.0, 0.0]
+  # Exploration mode ignores this goal; keep for backward-compat with goal mode
+  goal: [37.0, 25.0, 0.0]
+  radius: 0.25
+  height: 0.30
+  max_v: 1.2
+  max_w: 1.8
+
+lidar:
+  n_az: 180
+  n_el: 5
+  max_range: 10.0
+  el_deg: [-10, -5, 0, 5, 10]
+
+pedestrians:
+  count: 12
+  speed_range: [0.3, 1.0]
+  radius: 0.3
+  personal_space:
+    sigma_front: 1.6
+    sigma_side: 0.9
+    sigma_back: 0.7
+
+planner:
+  horizon_s: 2.0
+  n_samples: 160
+  w_goal: 1.0
+  w_smooth: 0.1
+  w_obstacle: 3.0
+  w_social: 2.5
+  min_clearance: 0.35
+  # SIEP-specific parameters
+  k_goal: 1.0
+  sigma_goal: 4.0
+  k_obs: 2.5
+  obs_influence: 2.5
+  k_ps: 2.0
+  ps_horizon: 1.5
+  ps_dt: 0.1
+  k_align: 0.3
+  align_radius: 3.5
+  align_cone_deg: 60.0
+  k_yaw: 2.5
+  heading_slowdown: 0.5
+  # Frontier exploration
+  k_frontier: 1.0
+  novelty_radius: 3.0
+  # Intent force
+  k_intent: 1.5

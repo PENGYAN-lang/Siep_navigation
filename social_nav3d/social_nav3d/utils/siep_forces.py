@@ -5,6 +5,8 @@ In the SIEP framework the robot's desired velocity is the superposition of
 virtual forces induced by all stimuli perceived from the environment:
 
   F_total = F_goal + F_obstacle + F_personal_space + F_velocity_alignment
+            + F_frontier (exploration mode)
+            + F_intent   (LLM-inferred pedestrian intent)
 
 The direction and magnitude of F_total define the robot's *equilibrium point* –
 the velocity the robot is driven towards.  A proportional heading controller
@@ -23,6 +25,15 @@ Three innovations over the plain anisotropic-Gaussian MPC cost approach:
 3. **Tanh-saturated goal attraction** – the goal force saturates at the
    desired cruising speed rather than growing unboundedly, giving smoother
    deceleration near the goal.
+
+Two additional channels (extensions):
+
+4. **Frontier exploration force** – replaces goal force when the robot operates
+   in free-exploration mode (no fixed destination).  Drives the robot toward
+   the least-visited/most-open direction.
+
+5. **Intent-induced force** – adds a social force derived from LLM-inferred
+   pedestrian intent labels (e.g. "calling" → attract, "avoiding" → repel).
 """
 from __future__ import annotations
 
@@ -61,6 +72,13 @@ class SIEPParams:
     align_radius: float = 3.0  # maximum effective radius [m]
     align_cone_deg: float = 60.0  # directional cone [deg] – only align with
     #   pedestrians whose heading is within this half-angle of the robot's
+
+    # --- Frontier exploration force ---------------------------------------
+    k_frontier: float = 1.0    # peak frontier-force magnitude
+    novelty_radius: float = 3.0  # positions within this radius count as visited
+
+    # --- Intent-induced force (LLM-derived) -------------------------------
+    k_intent: float = 1.5      # force scale for intent channel
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -227,3 +245,156 @@ def _aniso_gaussian(
     ex = (dx * dx) / (2.0 * sigma_x ** 2 + 1e-9)
     ey = (dy * dy) / (2.0 * sigma_y ** 2 + 1e-9)
     return float(math.exp(-(ex + ey)))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Extension: Frontier Exploration Force
+# ─────────────────────────────────────────────────────────────────────────────
+
+def frontier_exploration_force(
+    robot_xy: np.ndarray,
+    visited_positions: List[np.ndarray],
+    world_bounds: Tuple[float, float, float, float],
+    lidar_dists: np.ndarray,
+    lidar_angles_world: np.ndarray,
+    k: float = 1.0,
+    novelty_radius: float = 3.0,
+) -> np.ndarray:
+    """Frontier-exploration force for free-roaming navigation.
+
+    Replaces ``goal_force`` when there is no fixed destination.  The robot is
+    attracted toward the *least-visited, most-open* direction by combining:
+
+    1. **Novelty scoring** – candidate directions whose forward projection has
+       not been visited (no recorded position within ``novelty_radius``) score
+       higher.
+    2. **Openness scoring** – directions with larger LiDAR range (fewer nearby
+       obstacles) score higher, preventing the robot from driving into walls.
+    3. **Random wandering component** – a small stochastic nudge prevents the
+       robot from getting stuck in local minima.
+
+    Args:
+        robot_xy:            Current robot XY position (2,).
+        visited_positions:   History of past robot XY positions.
+        world_bounds:        (xmin, ymin, xmax, ymax) of the navigable area.
+        lidar_dists:         Per-ray distances in metres (N,).
+        lidar_angles_world:  World-frame azimuth angles of each LiDAR ray (N,).
+        k:                   Peak force magnitude (same units as ``goal_force``).
+        novelty_radius:      Radius within which a position is considered visited.
+
+    Returns:
+        2-D force vector directed toward the most promising frontier.
+    """
+    n_rays = len(lidar_angles_world)
+    if n_rays == 0:
+        return np.zeros(2, dtype=float)
+
+    xmin, ymin, xmax, ymax = world_bounds
+
+    # Build visited set as a numpy array for vectorised distance checks
+    if visited_positions:
+        visited_arr = np.array(visited_positions, dtype=float)  # (M, 2)
+    else:
+        visited_arr = None
+
+    # Score each LiDAR ray direction
+    scores = np.zeros(n_rays, dtype=float)
+    probe_dist = min(4.0, float(np.max(lidar_dists)))  # how far to probe for novelty
+
+    for i, (angle, dist) in enumerate(zip(lidar_angles_world, lidar_dists)):
+        # --- Openness: longer range → more open ---
+        openness = dist / max(float(np.max(lidar_dists)), 1e-6)
+
+        # --- Novelty: probe point along ray ---
+        d_probe = min(probe_dist, dist * 0.8)
+        probe_x = robot_xy[0] + d_probe * math.cos(angle)
+        probe_y = robot_xy[1] + d_probe * math.sin(angle)
+
+        # Clip probe to world bounds
+        probe_x = float(np.clip(probe_x, xmin, xmax))
+        probe_y = float(np.clip(probe_y, ymin, ymax))
+        probe = np.array([probe_x, probe_y], dtype=float)
+
+        novelty = 1.0  # default: fully novel
+        if visited_arr is not None:
+            dists_to_visited = np.linalg.norm(visited_arr - probe, axis=1)
+            min_dist = float(np.min(dists_to_visited))
+            # Novelty decays smoothly from 1 (unvisited) to 0 (fully visited)
+            novelty = float(np.clip(min_dist / (novelty_radius + 1e-6), 0.0, 1.0))
+
+        scores[i] = 0.6 * openness + 0.4 * novelty
+
+    # Compute force as weighted sum of ray unit vectors
+    fx = float(np.sum(scores * np.cos(lidar_angles_world)))
+    fy = float(np.sum(scores * np.sin(lidar_angles_world)))
+    F = np.array([fx, fy], dtype=float)
+
+    # Normalise and scale to peak magnitude k
+    F_mag = float(np.linalg.norm(F))
+    if F_mag < 1e-6:
+        # Stuck — pure random nudge
+        angle_rand = float(np.random.uniform(-math.pi, math.pi))
+        return k * np.array([math.cos(angle_rand), math.sin(angle_rand)], dtype=float)
+
+    # Random wandering component (10 % of peak force)
+    angle_rand = float(np.random.uniform(-math.pi, math.pi))
+    wander = 0.10 * k * np.array([math.cos(angle_rand), math.sin(angle_rand)], dtype=float)
+
+    return k * (F / F_mag) + wander
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Extension: Intent-Induced Force (LLM-derived)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Mapping from intent label to signed direction multiplier.
+# Positive → attract toward pedestrian; negative → repel away.
+_INTENT_DIRECTION: dict = {
+    "calling":    +1.0,   # pedestrian is summoning the robot → approach
+    "curious":    +0.5,   # mild interest → gentle approach
+    "gathering":  +0.6,   # group near exhibit → guided approach
+    "neutral":     0.0,   # no strong intent → no force
+    "avoiding":   -0.8,   # pedestrian does not want interaction → back off
+    "rushing":    -1.0,   # pedestrian in a hurry → clear the way
+}
+
+
+def intent_force(
+    robot_xy: np.ndarray,
+    ped_xy: np.ndarray,
+    intent_label: str,
+    force_scale: float,
+    k: float = 1.5,
+) -> np.ndarray:
+    """Intent-induced social force from a single pedestrian.
+
+    The force direction (attract vs. repel) is determined by the inferred
+    intent label; its magnitude is modulated by ``force_scale`` (output of the
+    LLM/rule engine, typically in [0, 1]) and ``k`` (global weight).
+
+    Args:
+        robot_xy:     Current robot XY position (2,).
+        ped_xy:       Pedestrian XY position (2,).
+        intent_label: One of the keys in ``_INTENT_DIRECTION``.
+        force_scale:  Magnitude scalar in [0, 1] from the intent engine.
+        k:            Global force scale.
+
+    Returns:
+        2-D force vector.  Zero if pedestrian is very close (< 0.3 m) or
+        intent is unknown.
+    """
+    direction_sign = _INTENT_DIRECTION.get(intent_label.lower(), 0.0)
+    if abs(direction_sign) < 1e-9:
+        return np.zeros(2, dtype=float)
+
+    d = ped_xy - robot_xy
+    dist = float(np.linalg.norm(d))
+    if dist < 0.3:
+        return np.zeros(2, dtype=float)
+
+    # Decay with distance: Gaussian envelope, sigma = 4 m
+    sigma_intent = 4.0
+    w_dist = math.exp(-(dist ** 2) / (2.0 * sigma_intent ** 2))
+
+    magnitude = k * force_scale * w_dist * direction_sign
+    return magnitude * (d / dist)

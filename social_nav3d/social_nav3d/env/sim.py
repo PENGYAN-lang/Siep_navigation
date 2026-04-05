@@ -75,7 +75,7 @@ class SocialNavSim:
             p.disconnect(self.client)
 
     def _build_world(self):
-        # Obstacles: simple boxes
+        # Obstacles: simple boxes (exhibit pedestals, display cases, etc.)
         for obs in self.cfg['world'].get('obstacles', []):
             pos = obs['pos']
             hx, hy, hz = obs['half_extents']
@@ -84,6 +84,26 @@ class SocialNavSim:
             )
             vis = p.createVisualShape(
                 p.GEOM_BOX, halfExtents=[hx, hy, hz], rgbaColor=[0.6, 0.6, 0.6, 1],
+                physicsClientId=self.client
+            )
+            p.createMultiBody(
+                baseMass=0,
+                baseCollisionShapeIndex=col,
+                baseVisualShapeIndex=vis,
+                basePosition=pos,
+                physicsClientId=self.client
+            )
+
+        # Walls: thin tall boxes (perimeter + interior partitions)
+        # Walls use a slightly different colour to be visually distinct.
+        for wall in self.cfg['world'].get('walls', []):
+            pos = wall['pos']
+            hx, hy, hz = wall['half_extents']
+            col = p.createCollisionShape(
+                p.GEOM_BOX, halfExtents=[hx, hy, hz], physicsClientId=self.client
+            )
+            vis = p.createVisualShape(
+                p.GEOM_BOX, halfExtents=[hx, hy, hz], rgbaColor=[0.85, 0.82, 0.78, 1],
                 physicsClientId=self.client
             )
             p.createMultiBody(
@@ -228,6 +248,96 @@ class SocialNavSim:
 
         return body
 
+    # ------------------------------------------------------------------
+    # Pedestrian clothing colour palette (varied, realistic)
+    # ------------------------------------------------------------------
+    _CLOTHING_PALETTE: List[Tuple[float, float, float]] = [
+        (0.18, 0.36, 0.60),  # navy blue
+        (0.55, 0.27, 0.07),  # brown
+        (0.12, 0.52, 0.29),  # forest green
+        (0.72, 0.15, 0.15),  # deep red
+        (0.45, 0.45, 0.45),  # charcoal
+        (0.85, 0.65, 0.12),  # mustard yellow
+        (0.30, 0.22, 0.48),  # dark purple
+        (0.15, 0.45, 0.55),  # teal
+        (0.80, 0.38, 0.10),  # burnt orange
+        (0.22, 0.22, 0.22),  # near black
+        (0.60, 0.78, 0.85),  # light blue
+        (0.50, 0.70, 0.40),  # sage green
+    ]
+
+    def _make_humanoid_links(
+        self,
+        clothing_rgb: Tuple[float, float, float],
+        rad: float,
+    ) -> Tuple[list, list, list, list, list, list, list, list, list]:
+        """Build the link arrays for a multi-link articulated humanoid.
+
+        The humanoid has 6 visual links (all FIXED joints, no collision):
+          0 – torso      (box)
+          1 – head       (sphere)
+          2 – left upper arm  (capsule)
+          3 – right upper arm (capsule)
+          4 – left upper leg  (capsule)
+          5 – right upper leg (capsule)
+
+        Returns:
+            Tuple of (masses, collisions, visuals, positions, orientations,
+                      inertial_pos, inertial_orn, parents, joint_types, joint_axes)
+        """
+        cr, cg, cb = clothing_rgb
+        skin = (0.95, 0.82, 0.70, 1.0)
+
+        # Visual shapes (no collision shapes for links → cheaper physics)
+        torso_v = p.createVisualShape(
+            p.GEOM_BOX, halfExtents=[rad * 0.8, rad * 0.55, 0.28],
+            rgbaColor=[cr, cg, cb, 1.0], physicsClientId=self.client,
+        )
+        head_v = p.createVisualShape(
+            p.GEOM_SPHERE, radius=rad * 0.72,
+            rgbaColor=skin, physicsClientId=self.client,
+        )
+        arm_v = p.createVisualShape(
+            p.GEOM_CAPSULE, radius=rad * 0.25, length=0.28,
+            rgbaColor=skin, physicsClientId=self.client,
+        )
+        leg_v = p.createVisualShape(
+            p.GEOM_CAPSULE, radius=rad * 0.30, length=0.38,
+            rgbaColor=[cr, cg, cb, 1.0], physicsClientId=self.client,
+        )
+
+        # PyBullet linkParentIndices: 0 = base body, 1 = link 0, 2 = link 1, …
+        # link 0 = torso  → parentIdx 0 (base)
+        # link 1 = head   → parentIdx 1 (link 0 = torso)
+        # link 2 = left arm  → parentIdx 1 (torso)
+        # link 3 = right arm → parentIdx 1 (torso)
+        # link 4 = left leg  → parentIdx 0 (base)
+        # link 5 = right leg → parentIdx 0 (base)
+        ident_orn = p.getQuaternionFromEuler([0, 0, 0])
+
+        visuals    = [torso_v, head_v, arm_v,       arm_v,        leg_v,         leg_v]
+        # Positions are relative to *parent* link frame
+        positions  = [
+            [0.0,  0.0,  0.65],   # torso centre (above collision capsule base)
+            [0.0,  0.0,  0.32],   # head above torso
+            [0.0,  0.50, 0.15],   # left arm (Y offset)
+            [0.0, -0.50, 0.15],   # right arm
+            [0.0,  0.20, -0.65],  # left leg (below base, Y offset)
+            [0.0, -0.20, -0.65],  # right leg
+        ]
+        orientations = [ident_orn] * 6
+        masses       = [0.0] * 6
+        collisions   = [-1]  * 6
+        inertial_pos = [[0, 0, 0]] * 6
+        inertial_orn = [ident_orn] * 6
+        # parents: torso→base, head→torso, arms→torso, legs→base
+        parents      = [0, 1, 1, 1, 0, 0]
+        joint_types  = [p.JOINT_FIXED] * 6
+        joint_axes   = [[0, 0, 1]] * 6
+
+        return (masses, collisions, visuals, positions, orientations,
+                inertial_pos, inertial_orn, parents, joint_types, joint_axes)
+
     def _spawn_pedestrians(self):
         n = int(self.cfg['pedestrians']['count'])
         rad = float(self.cfg['pedestrians']['radius'])
@@ -235,65 +345,36 @@ class SocialNavSim:
         ps_cfg = self.cfg['pedestrians']['personal_space']
         ps = PersonalSpace(**ps_cfg)
 
-        # Visual "human-ish" shapes (no mesh dependency)
-        # base collision: capsule
-        col = p.createCollisionShape(p.GEOM_CAPSULE, radius=rad, height=0.9, physicsClientId=self.client)
-
-        # base visual can be transparent (we render torso/head as links)
-        base_vis = p.createVisualShape(
-            p.GEOM_CAPSULE, radius=rad, length=0.9, rgbaColor=[0.0, 0.0, 0.0, 0.0],
-            physicsClientId=self.client
-        )
-
-        # torso and head visuals
-        torso_vis = p.createVisualShape(
-            p.GEOM_CYLINDER, radius=rad * 0.9, length=0.55,
-            rgbaColor=[0.2, 0.6, 0.9, 1.0], physicsClientId=self.client
-        )
-        head_vis = p.createVisualShape(
-            p.GEOM_SPHERE, radius=rad * 0.75,
-            rgbaColor=[0.95, 0.85, 0.7, 1.0], physicsClientId=self.client
-        )
-
         rng = np.random.default_rng(int(self.cfg.get('seed', 0)))
 
-        for i in range(n):
-            # force head-on flows in a corridor band (more likely collisions/negotiation)
-            lane_y = rng.uniform(7.0, 13.0)
-            if i < n // 2:
-                x = rng.uniform(2.0, 4.0)
-                y = lane_y
-                yaw = 0.0
-            else:
-                x = rng.uniform(16.0, 18.0)
-                y = lane_y
-                yaw = math.pi
+        # Determine spawn region from world size
+        sx, sy = self.cfg['world']['size_xy']
 
+        # Physics collision capsule — shared across all pedestrians
+        col = p.createCollisionShape(
+            p.GEOM_CAPSULE, radius=rad, height=0.9, physicsClientId=self.client
+        )
+        # Transparent base visual — actual body is rendered via links
+        base_vis = p.createVisualShape(
+            p.GEOM_CAPSULE, radius=rad, length=0.9,
+            rgbaColor=[0.0, 0.0, 0.0, 0.0], physicsClientId=self.client
+        )
+
+        palette = self._CLOTHING_PALETTE
+
+        for i in range(n):
+            # Spread pedestrians across the available space
+            x = float(rng.uniform(1.5, sx - 1.5))
+            y = float(rng.uniform(1.5, sy - 1.5))
+            yaw = float(rng.uniform(-math.pi, math.pi))
             speed = float(rng.uniform(vmin, vmax))
             vel = np.array([math.cos(yaw), math.sin(yaw)], dtype=float) * speed
 
-            # Create a 2-link body:
-            # base = collision capsule (physics), link0 = torso visual, link1 = head visual
-            # links have no collision (performance friendly)
-            link_masses = [0.0, 0.0]
-            link_collision = [-1, -1]
-            link_visual = [torso_vis, head_vis]
-            link_positions = [
-                [0.0, 0.0, 0.65],  # torso center
-                [0.0, 0.0, 1.10],  # head center
-            ]
-            link_orientations = [
-                p.getQuaternionFromEuler([0, 0, 0]),
-                p.getQuaternionFromEuler([0, 0, 0]),
-            ]
-            link_inertial_pos = [[0, 0, 0], [0, 0, 0]]
-            link_inertial_orn = [
-                p.getQuaternionFromEuler([0, 0, 0]),
-                p.getQuaternionFromEuler([0, 0, 0]),
-            ]
-            link_parent = [0, 0]
-            link_joint_type = [p.JOINT_FIXED, p.JOINT_FIXED]
-            link_joint_axis = [[0, 0, 1], [0, 0, 1]]
+            clothing = palette[i % len(palette)]
+
+            (link_masses, link_col, link_vis, link_pos, link_orn,
+             link_iner_pos, link_iner_orn, link_parents,
+             link_joint_types, link_joint_axes) = self._make_humanoid_links(clothing, rad)
 
             body = p.createMultiBody(
                 baseMass=70.0,
@@ -302,19 +383,22 @@ class SocialNavSim:
                 basePosition=[x, y, 0.9 / 2 + rad],
                 baseOrientation=p.getQuaternionFromEuler([0, 0, yaw]),
                 linkMasses=link_masses,
-                linkCollisionShapeIndices=link_collision,
-                linkVisualShapeIndices=link_visual,
-                linkPositions=link_positions,
-                linkOrientations=link_orientations,
-                linkInertialFramePositions=link_inertial_pos,
-                linkInertialFrameOrientations=link_inertial_orn,
-                linkParentIndices=link_parent,
-                linkJointTypes=link_joint_type,
-                linkJointAxis=link_joint_axis,
-                physicsClientId=self.client
+                linkCollisionShapeIndices=link_col,
+                linkVisualShapeIndices=link_vis,
+                linkPositions=link_pos,
+                linkOrientations=link_orn,
+                linkInertialFramePositions=link_iner_pos,
+                linkInertialFrameOrientations=link_iner_orn,
+                linkParentIndices=link_parents,
+                linkJointTypes=link_joint_types,
+                linkJointAxis=link_joint_axes,
+                physicsClientId=self.client,
             )
 
-            p.changeDynamics(body, -1, lateralFriction=1.0, rollingFriction=0.0, physicsClientId=self.client)
+            p.changeDynamics(
+                body, -1, lateralFriction=1.0, rollingFriction=0.0,
+                physicsClientId=self.client,
+            )
 
             self.pedestrians.append(
                 Pedestrian(
@@ -323,7 +407,7 @@ class SocialNavSim:
                     xy=np.array([x, y], dtype=float),
                     yaw=yaw,
                     vel=vel,
-                    ps=ps
+                    ps=ps,
                 )
             )
 
