@@ -339,7 +339,7 @@ class ProactiveSIEP:
             else:
                 self._low_speed_steps = 0
 
-            if self._low_speed_steps >= 20:  # ~1 s at 20 Hz plan rate
+            if self._low_speed_steps >= 20:  # ~1 s at typical 20 Hz plan rate (dt=0.05 s)
                 # Random kick: pick an open direction from lidar
                 if lidar_dists is not None and len(lidar_dists) > 0:
                     best_dir_idx = int(np.argmax(lidar_dists))

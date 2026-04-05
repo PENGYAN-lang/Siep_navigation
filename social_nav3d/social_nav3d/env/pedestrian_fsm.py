@@ -226,6 +226,13 @@ def create_typed_fsm_pedestrians(
             if not _check_wall_collision(np.array([x_, y_]), radius, wall_aabbs):
                 return x_, y_
         # Fallback: return last sample even if it overlaps (rare edge case)
+        import warnings
+        warnings.warn(
+            f"[create_typed_fsm_pedestrians] Could not find a wall-free spawn "
+            f"position after 50 attempts. Ped may start inside a wall.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return x_, y_
 
     # ── Determine type list ───────────────────────────────────────────────
