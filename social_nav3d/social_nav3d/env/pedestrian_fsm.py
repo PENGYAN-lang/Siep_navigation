@@ -68,9 +68,9 @@ MAX_ACCEL: float = 0.4         # [m/s²] maximum acceleration toward target spee
 PED_PED_REPULSION_K: float = 0.8
 PED_PED_DIST: float = 0.8      # [m]
 
-# Staff patrol speed
-STAFF_SPEED_MIN: float = 0.8
-STAFF_SPEED_MAX: float = 1.2
+# Staff patrol speed — reduced so staff is not much faster than robot
+STAFF_SPEED_MIN: float = 0.4
+STAFF_SPEED_MAX: float = 0.6
 
 # Group follow parameters
 GROUP_MAX_SEPARATION: float = 1.5  # [m] max distance from leader
@@ -190,11 +190,12 @@ def create_typed_fsm_pedestrians(
     waypoints: List[np.ndarray],
     seed: int = 0,
     ped_types: Optional[List[str]] = None,
+    wall_aabbs: Optional[List[Tuple[float, float, float, float]]] = None,
 ) -> List[FSMPedestrian]:
     """Factory: create N FSMPedestrians with 3 behavioral types.
 
     Type distribution (when ped_types=None, auto-generated):
-      - 8 visitors (slow, 0.3-0.7 m/s, long dwell 8-20s)
+      - 8 visitors (slow, 0.2-0.5 m/s, long dwell 8-20s)
       - 3 group visitors (green, move together)
       - 2 staff (orange, fast patrol, no dwell)
 
@@ -209,9 +210,23 @@ def create_typed_fsm_pedestrians(
     waypoints : list of interest points (exhibits, corners etc.)
     seed      : random seed for reproducibility
     ped_types : optional list of 'visitor'/'group'/'staff' (length n)
+    wall_aabbs : optional list of wall AABBs; when provided, spawn positions
+                 that collide with walls are rejected and resampled.
     """
     rng = np.random.default_rng(seed)
     sx, sy = world_size
+
+    def _safe_spawn(rng_: np.random.Generator) -> Tuple[float, float]:
+        """Sample a spawn (x, y) that is not inside a wall."""
+        for _ in range(50):
+            x_ = float(rng_.uniform(1.0, sx - 1.0))
+            y_ = float(rng_.uniform(1.0, sy - 1.0))
+            if wall_aabbs is None:
+                return x_, y_
+            if not _check_wall_collision(np.array([x_, y_]), radius, wall_aabbs):
+                return x_, y_
+        # Fallback: return last sample even if it overlaps (rare edge case)
+        return x_, y_
 
     # ── Determine type list ───────────────────────────────────────────────
     if ped_types is not None:
@@ -274,14 +289,12 @@ def create_typed_fsm_pedestrians(
         ped_seed = int(rng.integers(0, 2 ** 31))
         ped_rng = np.random.default_rng(ped_seed)
 
-        # Spawn position: uniform across world for all types (type-specific
-        # adjustment happens below for staff which re-spawns near patrol start)
-        x = float(ped_rng.uniform(1.0, sx - 1.0))
-        y = float(ped_rng.uniform(1.0, sy - 1.0))
+        # Spawn position: uniform across world, rejecting wall-colliding spots
+        x, y = _safe_spawn(ped_rng)
         yaw = float(ped_rng.uniform(-math.pi, math.pi))
 
         if ptype == "visitor":
-            base_speed = float(ped_rng.uniform(0.3, 0.7))
+            base_speed = float(ped_rng.uniform(0.2, 0.5))
             color = list(visitor_colors[visitor_ci % len(visitor_colors)])
             visitor_ci += 1
             vel = np.array([math.cos(yaw), math.sin(yaw)]) * base_speed
@@ -356,6 +369,20 @@ def create_typed_fsm_pedestrians(
 # FSM step function
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _check_wall_collision(
+    xy: np.ndarray,
+    radius: float,
+    wall_aabbs: List[Tuple[float, float, float, float]],
+) -> bool:
+    """Return True if *xy* (with *radius*) overlaps any wall AABB."""
+    px, py = float(xy[0]), float(xy[1])
+    for xmin_w, ymin_w, xmax_w, ymax_w in wall_aabbs:
+        if (px + radius > xmin_w and px - radius < xmax_w and
+                py + radius > ymin_w and py - radius < ymax_w):
+            return True
+    return False
+
+
 def step_fsm_pedestrians(
     peds: List[FSMPedestrian],
     waypoints: List[np.ndarray],
@@ -363,6 +390,7 @@ def step_fsm_pedestrians(
     dt: float,
     robot_xy: Optional[np.ndarray] = None,
     robot_radius: float = 0.3,
+    wall_aabbs: Optional[List[Tuple[float, float, float, float]]] = None,
 ) -> None:
     """Advance all pedestrians by one FSM step (in-place update).
 
@@ -374,6 +402,9 @@ def step_fsm_pedestrians(
     dt         : time step [s]
     robot_xy   : robot position for pedestrian avoidance (optional)
     robot_radius : robot radius for collision avoidance [m]
+    wall_aabbs : optional list of ``(xmin, ymin, xmax, ymax)`` wall
+                 bounding boxes for internal wall collision detection.
+                 When provided, pedestrians will not walk through walls.
     """
     sx, sy = world_size
     xmin, ymin, xmax, ymax = 0.5, 0.5, sx - 0.5, sy - 0.5
@@ -393,8 +424,31 @@ def step_fsm_pedestrians(
         _fsm_transition(ped, waypoints, dt)
         _fsm_velocity_update(ped, peds, robot_xy, robot_radius, dt)
 
-        # Integrate position
-        ped.xy = ped.xy + ped.vel * dt
+        # Integrate position with wall collision sliding
+        proposed = ped.xy + ped.vel * dt
+
+        if wall_aabbs is not None and _check_wall_collision(proposed, ped.radius, wall_aabbs):
+            # Try sliding: move only in X
+            proposed_x = ped.xy + np.array([ped.vel[0] * dt, 0.0])
+            # Try sliding: move only in Y
+            proposed_y = ped.xy + np.array([0.0, ped.vel[1] * dt])
+
+            can_x = not _check_wall_collision(proposed_x, ped.radius, wall_aabbs)
+            can_y = not _check_wall_collision(proposed_y, ped.radius, wall_aabbs)
+
+            if can_x:
+                proposed = proposed_x
+                ped.vel[1] = 0.0
+            elif can_y:
+                proposed = proposed_y
+                ped.vel[0] = 0.0
+            else:
+                # Fully blocked — stop and pick new target
+                proposed = ped.xy.copy()
+                ped.vel[:] = 0.0
+                ped.fsm_state = PedFSMState.WANDER
+
+        ped.xy = proposed
 
         # Boundary reflection
         if ped.xy[0] < xmin or ped.xy[0] > xmax:
@@ -546,7 +600,7 @@ def _fsm_velocity_update(
                         avoid_F += mag * (d_robot / dist_r)
                 target_vel = desired_vel + avoid_F
                 speed_tv = float(np.linalg.norm(target_vel))
-                max_speed = ped.base_speed * 1.5
+                max_speed = ped.base_speed * 1.2
                 if speed_tv > max_speed:
                     target_vel = target_vel / speed_tv * max_speed
                 dv = target_vel - ped.vel
@@ -613,7 +667,7 @@ def _fsm_velocity_update(
 
     # Clamp speed
     speed = float(np.linalg.norm(target_vel))
-    max_speed = ped.base_speed * 1.5
+    max_speed = ped.base_speed * 1.2
     if speed > max_speed:
         target_vel = target_vel / speed * max_speed
 

@@ -15,11 +15,11 @@ sim:
 
 world:
   type: museum           # triggers museum_builder instead of simple boxes
-  size_xy: [30.0, 25.0]  # museum floor area
+  size_xy: [40.0, 35.0]  # expanded museum floor area (40 m × 35 m)
 
 robot:
-  start: [11.0, 2.0, 0.0]   # entrance hall
-  goal:  [25.0, 15.0, 0.0]  # wing room (used in goal mode only)
+  start: [14.0, 2.0, 0.0]   # entrance hall centre
+  goal:  [32.0, 20.0, 0.0]  # wing room (used in goal mode only)
   radius: 0.25
   height: 0.30
   max_v: 1.0
@@ -28,33 +28,33 @@ robot:
 lidar:
   n_az: 180
   n_el: 3
-  max_range: 10.0
+  max_range: 12.0
   el_deg: [-5, 0, 5]
 
 pedestrians:
-  count: 13
-  speed_range: [0.3, 1.0]   # museum visitors walk slower
+  count: 9                    # reduced — larger scene keeps density comfortable
+  speed_range: [0.2, 0.5]    # realistic museum visitor pace
   radius: 0.3
   personal_space:
     sigma_front: 1.6
     sigma_side: 0.9
     sigma_back: 0.7
-  # Exhibit positions matching museum_builder.py pedestals
-  # These are used as FSM waypoints (points of interest)
+  # Exhibit positions matching museum_builder.py pedestals + corridor junctions
   waypoints:
     # Main gallery exhibits
-    - [8.0,  10.0]
-    - [12.0, 10.0]
-    - [16.0, 10.0]
-    - [10.0, 15.0]
-    - [15.0, 15.0]
+    - [10.0, 14.0]
+    - [16.0, 14.0]
+    - [10.0, 21.0]
+    - [16.0, 21.0]
     # Wing room exhibits
-    - [24.0, 11.0]
-    - [27.0, 11.0]
-    - [25.0, 16.0]
-    # Entrance hall exhibits
-    - [9.0,  3.0]
-    - [13.0, 3.0]
+    - [28.0, 14.0]
+    - [34.0, 14.0]
+    - [30.0, 20.0]
+    # Entrance hall
+    - [14.0,  4.0]
+    # Top corridor junctions (encourage corridor traversal)
+    - [14.0, 30.0]
+    - [30.0, 30.0]
 
 planner:
   # Horizon and sampling — GPU allows larger candidate set
@@ -69,25 +69,25 @@ planner:
 
   # Objective weights (lambda values)
   lambda_s: 1.0            # social cost weight
-  lambda_u: 0.8            # uncertainty cost weight (increased for museum)
+  lambda_u: 0.8            # uncertainty cost weight
   lambda_d: 0.3            # dynamics cost weight
-  lambda_e: 1.2            # exploration gain weight (higher for free roam)
+  lambda_e: 1.8            # exploration gain weight (strong for free roam)
 
   # SIEP force parameters
   k_goal: 0.0              # no goal force in explore mode
   sigma_goal: 3.0
   k_obs: 2.5
-  obs_influence: 2.5
-  k_ps: 2.5                # stronger personal-space in crowded museum
+  obs_influence: 2.0       # slightly reduced to avoid excessive braking
+  k_ps: 2.5                # personal-space repulsion in museum
   k_align: 0.4
   k_ctx: 0.5
-  k_frontier: 1.5          # stronger frontier attraction for coverage
-  novelty_radius: 2.0      # larger novelty radius for museum rooms
+  k_frontier: 2.0          # stronger frontier pull for multi-room coverage
+  novelty_radius: 2.0      # grid cell size for visited-area tracking
 
   # Safety barrier (CBF)
-  min_clearance: 0.40      # slightly larger clearance in museum
+  min_clearance: 0.35      # minimum obstacle clearance
   cbf_alpha: 1.0           # CBF decay rate α
-  cbf_jerk_limit: 0.25     # max velocity change per step [m/s]
+  cbf_jerk_limit: 0.5      # relaxed max velocity change per step [m/s]
 
   # Heading controller
   k_yaw: 2.5
