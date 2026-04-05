@@ -54,9 +54,17 @@ class VideoRecorder3D:
         self.height = 720
         self.fps = 30
 
-        world_size: float = cfg["world"]["size_xy"]
-        self._center_x = world_size / 2.0
-        self._center_y = world_size / 2.0
+        size_xy = cfg["world"]["size_xy"]
+        if isinstance(size_xy, (list, tuple)):
+            if len(size_xy) < 2:
+                raise ValueError(
+                    f"cfg['world']['size_xy'] must have at least 2 elements [sx, sy], got {size_xy!r}"
+                )
+            self._center_x = float(size_xy[0]) / 2.0
+            self._center_y = float(size_xy[1]) / 2.0
+        else:
+            self._center_x = float(size_xy) / 2.0
+            self._center_y = float(size_xy) / 2.0
         self._max_steps: int = cfg["sim"]["max_steps"]
 
         self._frames: list[np.ndarray] = []
