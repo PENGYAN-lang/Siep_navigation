@@ -38,11 +38,19 @@ import numpy as np
 # ─────────────────────────────────────────────────────────────────────────────
 
 class PedFSMState(Enum):
-    WANDER   = auto()
-    WALK_TO  = auto()
-    APPROACH = auto()
-    VIEWING  = auto()
-    TURNING  = auto()
+    WANDER       = auto()
+    WALK_TO      = auto()
+    APPROACH     = auto()
+    VIEWING      = auto()
+    TURNING      = auto()
+    GROUP_FOLLOW = auto()   # group members follow their leader
+    PATROL       = auto()   # staff walk a fixed patrol route loop
+
+
+class PedType(Enum):
+    VISITOR = auto()       # museum visitors: slow, long dwell at exhibits
+    GROUP   = auto()       # group visitors: move together, follow leader
+    STAFF   = auto()       # staff/transit: fast, no dwell, patrol routes
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -59,6 +67,18 @@ MAX_ACCEL: float = 0.4         # [m/s²] maximum acceleration toward target spee
 # Ped-ped SFM avoidance (lightweight, not full SFM)
 PED_PED_REPULSION_K: float = 0.8
 PED_PED_DIST: float = 0.8      # [m]
+
+# Staff patrol speed
+STAFF_SPEED_MIN: float = 0.8
+STAFF_SPEED_MAX: float = 1.2
+
+# Group follow parameters
+GROUP_MAX_SEPARATION: float = 1.5  # [m] max distance from leader
+GROUP_FOLLOW_OFFSET: float = 0.8   # [m] follow distance behind leader
+
+# Visitor dwell times (longer than base)
+VISITOR_DWELL_MIN: float = 8.0    # [s]
+VISITOR_DWELL_MAX: float = 20.0   # [s]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -90,6 +110,12 @@ class FSMPedestrian:
     radius: float = 0.3
     # Random state per pedestrian (reproducible)
     _rng: Optional[np.random.Generator] = field(default=None, repr=False)
+    # Typed behaviour fields
+    ped_type: PedType = PedType.VISITOR
+    torso_color: list = field(default_factory=lambda: [0.2, 0.6, 0.9, 1.0])  # RGBA
+    leader_idx: Optional[int] = None             # for GROUP type: index of leader ped
+    patrol_waypoints: Optional[List[np.ndarray]] = field(default=None, repr=False)  # for STAFF
+    patrol_idx: int = 0                          # current patrol waypoint index
 
     def __post_init__(self):
         if self._rng is None:
@@ -156,6 +182,179 @@ def create_fsm_pedestrians(
     return peds
 
 
+def create_typed_fsm_pedestrians(
+    n: int,
+    world_size: Tuple[float, float],
+    speed_range: Tuple[float, float],
+    radius: float,
+    waypoints: List[np.ndarray],
+    seed: int = 0,
+    ped_types: Optional[List[str]] = None,
+) -> List[FSMPedestrian]:
+    """Factory: create N FSMPedestrians with 3 behavioral types.
+
+    Type distribution (when ped_types=None, auto-generated):
+      - 8 visitors (slow, 0.3-0.7 m/s, long dwell 8-20s)
+      - 3 group visitors (green, move together)
+      - 2 staff (orange, fast patrol, no dwell)
+
+    For n != 13, the distribution scales proportionally.
+
+    Parameters
+    ----------
+    n         : total pedestrian count
+    world_size : (sx, sy) world dimensions [m]
+    speed_range : (vmin, vmax) walking speed range [m/s]
+    radius    : pedestrian radius [m]
+    waypoints : list of interest points (exhibits, corners etc.)
+    seed      : random seed for reproducibility
+    ped_types : optional list of 'visitor'/'group'/'staff' (length n)
+    """
+    rng = np.random.default_rng(seed)
+    sx, sy = world_size
+
+    # ── Determine type list ───────────────────────────────────────────────
+    if ped_types is not None:
+        type_list = [t.lower() for t in ped_types]
+    else:
+        if n == 13:
+            n_visitor, n_group, n_staff = 8, 3, 2
+        else:
+            n_staff = max(1, round(n * 2 / 13))
+            n_group = max(1, round(n * 3 / 13))
+            n_visitor = max(1, n - n_staff - n_group)
+            # Adjust to exactly n
+            while n_visitor + n_group + n_staff > n:
+                n_visitor -= 1
+            while n_visitor + n_group + n_staff < n:
+                n_visitor += 1
+        type_list = (
+            ["visitor"] * n_visitor
+            + ["group"] * n_group
+            + ["staff"] * n_staff
+        )
+
+    # ── Color palettes ────────────────────────────────────────────────────
+    visitor_colors = [
+        [0.2, 0.5, 0.8, 1.0],
+        [0.3, 0.4, 0.9, 1.0],
+        [0.1, 0.6, 0.7, 1.0],
+    ]
+    group_colors = [
+        [0.2, 0.7, 0.3, 1.0],
+        [0.3, 0.8, 0.2, 1.0],
+        [0.1, 0.65, 0.35, 1.0],
+    ]
+    staff_color = [0.9, 0.5, 0.1, 1.0]
+
+    # ── Build patrol routes (for STAFF) ───────────────────────────────────
+    def _make_patrol_route(rng_: np.random.Generator) -> List[np.ndarray]:
+        """Generate a ~4-waypoint loop through the scene."""
+        margin = 1.5
+        xs = [margin, sx - margin, sx - margin, margin]
+        ys = [margin, margin, sy - margin, sy - margin]
+        # Slight random offset so each staff has a different route
+        offsets_x = rng_.uniform(-sx * 0.1, sx * 0.1, 4)
+        offsets_y = rng_.uniform(-sy * 0.1, sy * 0.1, 4)
+        return [
+            np.array([
+                float(np.clip(xs[k] + offsets_x[k], margin, sx - margin)),
+                float(np.clip(ys[k] + offsets_y[k], margin, sy - margin)),
+            ], dtype=float)
+            for k in range(4)
+        ]
+
+    # ── Create pedestrians ────────────────────────────────────────────────
+    peds: List[FSMPedestrian] = []
+    visitor_ci = 0
+    group_ci = 0
+    group_leader_idx: Optional[int] = None  # index of first group ped (leader)
+
+    for i, ptype in enumerate(type_list):
+        ped_seed = int(rng.integers(0, 2 ** 31))
+        ped_rng = np.random.default_rng(ped_seed)
+
+        # Spawn position
+        if sx >= 25.0 and sy >= 25.0:
+            x = float(ped_rng.uniform(1.0, sx - 1.0))
+            y = float(ped_rng.uniform(1.0, sy - 1.0))
+        else:
+            x = float(ped_rng.uniform(1.0, sx - 1.0))
+            y = float(ped_rng.uniform(1.0, sy - 1.0))
+        yaw = float(ped_rng.uniform(-math.pi, math.pi))
+
+        if ptype == "visitor":
+            base_speed = float(ped_rng.uniform(0.3, 0.7))
+            color = list(visitor_colors[visitor_ci % len(visitor_colors)])
+            visitor_ci += 1
+            vel = np.array([math.cos(yaw), math.sin(yaw)]) * base_speed
+            ped = FSMPedestrian(
+                xy=np.array([x, y], dtype=float),
+                yaw=yaw,
+                vel=vel,
+                base_speed=base_speed,
+                radius=radius,
+                _rng=ped_rng,
+                ped_type=PedType.VISITOR,
+                torso_color=color,
+                fsm_state=PedFSMState.WANDER,
+            )
+
+        elif ptype == "group":
+            base_speed = float(ped_rng.uniform(speed_range[0], speed_range[1]))
+            color = list(group_colors[group_ci % len(group_colors)])
+            group_ci += 1
+            vel = np.array([math.cos(yaw), math.sin(yaw)]) * base_speed
+
+            is_leader = group_leader_idx is None
+            if is_leader:
+                group_leader_idx = i
+                fsm_state = PedFSMState.WALK_TO
+                leader_idx = None
+            else:
+                fsm_state = PedFSMState.GROUP_FOLLOW
+                leader_idx = group_leader_idx
+
+            ped = FSMPedestrian(
+                xy=np.array([x, y], dtype=float),
+                yaw=yaw,
+                vel=vel,
+                base_speed=base_speed,
+                radius=radius,
+                _rng=ped_rng,
+                ped_type=PedType.GROUP,
+                torso_color=color,
+                fsm_state=fsm_state,
+                leader_idx=leader_idx,
+            )
+
+        else:  # staff
+            base_speed = float(ped_rng.uniform(STAFF_SPEED_MIN, STAFF_SPEED_MAX))
+            patrol_wps = _make_patrol_route(ped_rng)
+            # Staff spawn near first patrol waypoint
+            x = float(np.clip(patrol_wps[0][0] + ped_rng.uniform(-0.5, 0.5), 0.5, sx - 0.5))
+            y = float(np.clip(patrol_wps[0][1] + ped_rng.uniform(-0.5, 0.5), 0.5, sy - 0.5))
+            vel = np.array([math.cos(yaw), math.sin(yaw)]) * base_speed
+            ped = FSMPedestrian(
+                xy=np.array([x, y], dtype=float),
+                yaw=yaw,
+                vel=vel,
+                base_speed=base_speed,
+                radius=radius,
+                _rng=ped_rng,
+                ped_type=PedType.STAFF,
+                torso_color=list(staff_color),
+                fsm_state=PedFSMState.PATROL,
+                patrol_waypoints=patrol_wps,
+                patrol_idx=0,
+                target_xy=patrol_wps[0].copy(),
+            )
+
+        peds.append(ped)
+
+    return peds
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # FSM step function
 # ─────────────────────────────────────────────────────────────────────────────
@@ -181,6 +380,17 @@ def step_fsm_pedestrians(
     """
     sx, sy = world_size
     xmin, ymin, xmax, ymax = 0.5, 0.5, sx - 0.5, sy - 0.5
+
+    # Update group follower targets (must happen before FSM step)
+    for ped in peds:
+        if ped.fsm_state == PedFSMState.GROUP_FOLLOW and ped.leader_idx is not None:
+            if 0 <= ped.leader_idx < len(peds):
+                leader = peds[ped.leader_idx]
+                offset_dir = np.array([
+                    math.cos(leader.yaw + math.pi),
+                    math.sin(leader.yaw + math.pi),
+                ])
+                ped.target_xy = leader.xy + offset_dir * GROUP_FOLLOW_OFFSET
 
     for ped in peds:
         _fsm_transition(ped, waypoints, dt)
@@ -244,8 +454,15 @@ def _fsm_transition(
             return
         dist = float(np.linalg.norm(ped.target_xy - ped.xy))
         if dist < ARRIVED_DIST:
-            ped.fsm_state = PedFSMState.VIEWING
-            ped.view_timer = float(rng.uniform(DWELL_MIN, DWELL_MAX))
+            if ped.ped_type == PedType.STAFF:
+                # Staff don't stop, continue to next patrol waypoint
+                ped.fsm_state = PedFSMState.PATROL
+            else:
+                ped.fsm_state = PedFSMState.VIEWING
+                if ped.ped_type == PedType.VISITOR:
+                    ped.view_timer = float(rng.uniform(VISITOR_DWELL_MIN, VISITOR_DWELL_MAX))
+                else:
+                    ped.view_timer = float(rng.uniform(DWELL_MIN, DWELL_MAX))
 
     elif ped.fsm_state == PedFSMState.VIEWING:
         ped.view_timer -= dt
@@ -258,6 +475,22 @@ def _fsm_transition(
         delta_yaw = float(rng.uniform(-math.pi * 0.5, math.pi * 0.5))
         ped.yaw = (ped.yaw + delta_yaw + math.pi) % (2 * math.pi) - math.pi
         ped.fsm_state = PedFSMState.WANDER
+
+    elif ped.fsm_state == PedFSMState.PATROL:
+        # Staff: advance along patrol waypoints without stopping
+        if ped.patrol_waypoints and len(ped.patrol_waypoints) > 0:
+            current_wp = ped.patrol_waypoints[ped.patrol_idx]
+            dist = float(np.linalg.norm(current_wp - ped.xy))
+            if dist < ARRIVED_DIST * 1.5:  # reach next waypoint
+                ped.patrol_idx = (ped.patrol_idx + 1) % len(ped.patrol_waypoints)
+                ped.target_xy = ped.patrol_waypoints[ped.patrol_idx].copy()
+            else:
+                ped.target_xy = current_wp.copy()
+        # stay in PATROL state (never exits)
+
+    elif ped.fsm_state == PedFSMState.GROUP_FOLLOW:
+        # Group followers: target_xy is updated externally in step_fsm_pedestrians
+        pass
 
 
 def _fsm_velocity_update(
@@ -280,6 +513,53 @@ def _fsm_velocity_update(
 
     if ped.fsm_state == PedFSMState.TURNING:
         ped.vel = np.zeros(2, dtype=float)
+        return
+
+    if ped.fsm_state == PedFSMState.GROUP_FOLLOW:
+        if ped.target_xy is not None:
+            to_target = ped.target_xy - ped.xy
+            dist = float(np.linalg.norm(to_target))
+            if dist > GROUP_FOLLOW_OFFSET:
+                desired_dir = to_target / dist
+                desired_speed = min(ped.base_speed * 1.1, dist * 1.5)
+                desired_vel = desired_dir * desired_speed
+                # Ped-ped avoidance
+                avoid_F = np.zeros(2, dtype=float)
+                for other in all_peds:
+                    if other is ped:
+                        continue
+                    d = ped.xy - other.xy
+                    d_dist = float(np.linalg.norm(d))
+                    if 0 < d_dist < PED_PED_DIST + ped.radius + other.radius:
+                        avoid_F += PED_PED_REPULSION_K / max(d_dist, 1e-6) * (d / d_dist)
+                if robot_xy is not None:
+                    d_robot = ped.xy - robot_xy
+                    dist_r = float(np.linalg.norm(d_robot))
+                    robot_inf = 1.5
+                    if 0 < dist_r < robot_inf + ped.radius + robot_radius:
+                        decay = robot_inf * 0.4
+                        mag = 1.5 * math.exp(-dist_r / max(decay, 1e-6))
+                        avoid_F += mag * (d_robot / dist_r)
+                target_vel = desired_vel + avoid_F
+                speed_tv = float(np.linalg.norm(target_vel))
+                max_speed = ped.base_speed * 1.5
+                if speed_tv > max_speed:
+                    target_vel = target_vel / speed_tv * max_speed
+                dv = target_vel - ped.vel
+                dv_mag = float(np.linalg.norm(dv))
+                max_dv = MAX_ACCEL * dt
+                if dv_mag > max_dv:
+                    dv = dv / dv_mag * max_dv
+                ped.vel = ped.vel + dv
+                speed_final = float(np.linalg.norm(ped.vel))
+                if speed_final > 0.1:
+                    ped.yaw = float(math.atan2(float(ped.vel[1]), float(ped.vel[0])))
+            else:
+                # Close enough — decelerate
+                speed = float(np.linalg.norm(ped.vel))
+                decel = min(speed, MAX_ACCEL * dt)
+                if speed > 1e-6:
+                    ped.vel = ped.vel * max(0.0, 1.0 - decel / speed)
         return
 
     if ped.target_xy is None or ped.fsm_state == PedFSMState.WANDER:
