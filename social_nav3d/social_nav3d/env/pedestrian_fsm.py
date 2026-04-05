@@ -274,13 +274,10 @@ def create_typed_fsm_pedestrians(
         ped_seed = int(rng.integers(0, 2 ** 31))
         ped_rng = np.random.default_rng(ped_seed)
 
-        # Spawn position
-        if sx >= 25.0 and sy >= 25.0:
-            x = float(ped_rng.uniform(1.0, sx - 1.0))
-            y = float(ped_rng.uniform(1.0, sy - 1.0))
-        else:
-            x = float(ped_rng.uniform(1.0, sx - 1.0))
-            y = float(ped_rng.uniform(1.0, sy - 1.0))
+        # Spawn position: uniform across world for all types (type-specific
+        # adjustment happens below for staff which re-spawns near patrol start)
+        x = float(ped_rng.uniform(1.0, sx - 1.0))
+        y = float(ped_rng.uniform(1.0, sy - 1.0))
         yaw = float(ped_rng.uniform(-math.pi, math.pi))
 
         if ptype == "visitor":
@@ -457,6 +454,13 @@ def _fsm_transition(
             if ped.ped_type == PedType.STAFF:
                 # Staff don't stop, continue to next patrol waypoint
                 ped.fsm_state = PedFSMState.PATROL
+            elif ped.ped_type == PedType.GROUP:
+                # Group members don't dwell; leader picks a new target, followers keep following
+                if ped.leader_idx is None:
+                    # This ped is the group leader — turn and pick a new waypoint
+                    ped.fsm_state = PedFSMState.TURNING
+                else:
+                    ped.fsm_state = PedFSMState.GROUP_FOLLOW
             else:
                 ped.fsm_state = PedFSMState.VIEWING
                 if ped.ped_type == PedType.VISITOR:
