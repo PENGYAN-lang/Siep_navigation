@@ -3,7 +3,7 @@ import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pybullet as p
@@ -11,6 +11,11 @@ import pybullet_data
 
 from ..utils.geometry import Pose2, integrate_diff_drive
 from ..utils.social import PersonalSpace
+from .pedestrian_fsm import (
+    FSMPedestrian,
+    create_fsm_pedestrians,
+    step_fsm_pedestrians,
+)
 
 
 @dataclass
@@ -41,6 +46,9 @@ class SocialNavSim:
         self.out_dir = Path(cfg['sim'].get('out_dir', 'runs'))
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
+        # Simulation mode: 'goal' (A→B) or 'explore' (free roaming)
+        self.mode: str = cfg['sim'].get('mode', 'goal')
+
         self.client = p.connect(p.GUI if self.gui else p.DIRECT)
         p.resetSimulation(physicsClientId=self.client)
         p.setAdditionalSearchPath(pybullet_data.getDataPath(), physicsClientId=self.client)
@@ -67,8 +75,18 @@ class SocialNavSim:
         self.max_w = float(cfg['robot']['max_w'])
         self.robot_radius = float(cfg['robot']['radius'])
 
+        # Waypoints / exhibit positions for FSM pedestrian navigation
+        self._waypoints: List[np.ndarray] = self._load_waypoints()
+
+        # PyBullet Pedestrian list (physics bodies with visual links)
         self.pedestrians: List[Pedestrian] = []
+        # FSM logic layer (parallel to self.pedestrians, same index)
+        self._fsm_peds: List[FSMPedestrian] = []
+
         self._spawn_pedestrians()
+
+        # Visited positions for exploration coverage tracking
+        self._visited_xys: List[np.ndarray] = []
 
     def close(self):
         if p.isConnected(self.client):
@@ -228,24 +246,72 @@ class SocialNavSim:
 
         return body
 
+    def _load_waypoints(self) -> List[np.ndarray]:
+        """Load or auto-generate waypoints for FSM pedestrian navigation.
+
+        Waypoints are used as "interest points" (exhibit positions) that
+        pedestrians walk toward, dwell at, then depart — modelling museum-style
+        visitor behaviour.
+
+        If the config specifies ``pedestrians.waypoints``, those are used.
+        Otherwise a grid of waypoints is auto-generated from world obstacles
+        (obstacle centres make reasonable exhibit proxies) plus uniformly
+        distributed fallback points.
+        """
+        wps_cfg = self.cfg.get('pedestrians', {}).get('waypoints', None)
+        if wps_cfg:
+            return [np.array(wp, dtype=float) for wp in wps_cfg]
+
+        # Auto-generate: use obstacle positions + grid points
+        sx, sy = self.cfg['world']['size_xy']
+        wps: List[np.ndarray] = []
+        for obs in self.cfg['world'].get('obstacles', []):
+            wps.append(np.array(obs['pos'][:2], dtype=float))
+
+        # Add a grid of fallback positions
+        for gx in np.linspace(sx * 0.2, sx * 0.8, 3):
+            for gy in np.linspace(sy * 0.2, sy * 0.8, 3):
+                wps.append(np.array([gx, gy], dtype=float))
+
+        return wps
+
     def _spawn_pedestrians(self):
+        """Spawn pedestrians with FSM logic layer.
+
+        Creates:
+          - PyBullet multi-body (physics + visual) for each pedestrian.
+          - Corresponding FSMPedestrian for behaviour (FSM state machine).
+
+        The two lists (self.pedestrians and self._fsm_peds) are kept in sync:
+        index i in both lists refers to the same individual.
+        """
         n = int(self.cfg['pedestrians']['count'])
         rad = float(self.cfg['pedestrians']['radius'])
         vmin, vmax = self.cfg['pedestrians']['speed_range']
         ps_cfg = self.cfg['pedestrians']['personal_space']
         ps = PersonalSpace(**ps_cfg)
+        seed = int(self.cfg.get('seed', 0))
 
-        # Visual "human-ish" shapes (no mesh dependency)
-        # base collision: capsule
-        col = p.createCollisionShape(p.GEOM_CAPSULE, radius=rad, height=0.9, physicsClientId=self.client)
-
-        # base visual can be transparent (we render torso/head as links)
-        base_vis = p.createVisualShape(
-            p.GEOM_CAPSULE, radius=rad, length=0.9, rgbaColor=[0.0, 0.0, 0.0, 0.0],
-            physicsClientId=self.client
+        # ── FSM pedestrian logic (no PyBullet dependency) ────────────────
+        sx, sy = self.cfg['world']['size_xy']
+        self._fsm_peds = create_fsm_pedestrians(
+            n=n,
+            world_size=(sx, sy),
+            speed_range=(vmin, vmax),
+            radius=rad,
+            waypoints=self._waypoints,
+            seed=seed,
+            lane_flow=True,
         )
 
-        # torso and head visuals
+        # Visual shape shared across all pedestrians
+        col = p.createCollisionShape(
+            p.GEOM_CAPSULE, radius=rad, height=0.9, physicsClientId=self.client
+        )
+        base_vis = p.createVisualShape(
+            p.GEOM_CAPSULE, radius=rad, length=0.9,
+            rgbaColor=[0.0, 0.0, 0.0, 0.0], physicsClientId=self.client
+        )
         torso_vis = p.createVisualShape(
             p.GEOM_CYLINDER, radius=rad * 0.9, length=0.55,
             rgbaColor=[0.2, 0.6, 0.9, 1.0], physicsClientId=self.client
@@ -255,46 +321,26 @@ class SocialNavSim:
             rgbaColor=[0.95, 0.85, 0.7, 1.0], physicsClientId=self.client
         )
 
-        rng = np.random.default_rng(int(self.cfg.get('seed', 0)))
+        link_masses = [0.0, 0.0]
+        link_collision = [-1, -1]
+        link_visual = [torso_vis, head_vis]
+        link_positions = [[0.0, 0.0, 0.65], [0.0, 0.0, 1.10]]
+        link_orientations = [
+            p.getQuaternionFromEuler([0, 0, 0]),
+            p.getQuaternionFromEuler([0, 0, 0]),
+        ]
+        link_inertial_pos = [[0, 0, 0], [0, 0, 0]]
+        link_inertial_orn = [
+            p.getQuaternionFromEuler([0, 0, 0]),
+            p.getQuaternionFromEuler([0, 0, 0]),
+        ]
+        link_parent = [0, 0]
+        link_joint_type = [p.JOINT_FIXED, p.JOINT_FIXED]
+        link_joint_axis = [[0, 0, 1], [0, 0, 1]]
 
-        for i in range(n):
-            # force head-on flows in a corridor band (more likely collisions/negotiation)
-            lane_y = rng.uniform(7.0, 13.0)
-            if i < n // 2:
-                x = rng.uniform(2.0, 4.0)
-                y = lane_y
-                yaw = 0.0
-            else:
-                x = rng.uniform(16.0, 18.0)
-                y = lane_y
-                yaw = math.pi
-
-            speed = float(rng.uniform(vmin, vmax))
-            vel = np.array([math.cos(yaw), math.sin(yaw)], dtype=float) * speed
-
-            # Create a 2-link body:
-            # base = collision capsule (physics), link0 = torso visual, link1 = head visual
-            # links have no collision (performance friendly)
-            link_masses = [0.0, 0.0]
-            link_collision = [-1, -1]
-            link_visual = [torso_vis, head_vis]
-            link_positions = [
-                [0.0, 0.0, 0.65],  # torso center
-                [0.0, 0.0, 1.10],  # head center
-            ]
-            link_orientations = [
-                p.getQuaternionFromEuler([0, 0, 0]),
-                p.getQuaternionFromEuler([0, 0, 0]),
-            ]
-            link_inertial_pos = [[0, 0, 0], [0, 0, 0]]
-            link_inertial_orn = [
-                p.getQuaternionFromEuler([0, 0, 0]),
-                p.getQuaternionFromEuler([0, 0, 0]),
-            ]
-            link_parent = [0, 0]
-            link_joint_type = [p.JOINT_FIXED, p.JOINT_FIXED]
-            link_joint_axis = [[0, 0, 1], [0, 0, 1]]
-
+        for fsm_ped in self._fsm_peds:
+            x, y = float(fsm_ped.xy[0]), float(fsm_ped.xy[1])
+            yaw = float(fsm_ped.yaw)
             body = p.createMultiBody(
                 baseMass=70.0,
                 baseCollisionShapeIndex=col,
@@ -313,19 +359,18 @@ class SocialNavSim:
                 linkJointAxis=link_joint_axis,
                 physicsClientId=self.client
             )
-
-            p.changeDynamics(body, -1, lateralFriction=1.0, rollingFriction=0.0, physicsClientId=self.client)
-
-            self.pedestrians.append(
-                Pedestrian(
-                    body_id=body,
-                    radius=rad,
-                    xy=np.array([x, y], dtype=float),
-                    yaw=yaw,
-                    vel=vel,
-                    ps=ps
-                )
+            p.changeDynamics(
+                body, -1, lateralFriction=1.0, rollingFriction=0.0,
+                physicsClientId=self.client
             )
+            self.pedestrians.append(Pedestrian(
+                body_id=body,
+                radius=rad,
+                xy=fsm_ped.xy.copy(),
+                yaw=yaw,
+                vel=fsm_ped.vel.copy(),
+                ps=ps,
+            ))
 
     def reset(self) -> Pose2:
         self.robot_pose = Pose2(float(self.start[0]), float(self.start[1]), float(self.start[2]))
@@ -336,24 +381,29 @@ class SocialNavSim:
             physicsClientId=self.client
         )
         p.resetBaseVelocity(self.robot_id, [0, 0, 0], [0, 0, 0], physicsClientId=self.client)
+        self._visited_xys.clear()
         return self.robot_pose.copy()
 
     def _step_pedestrians(self):
+        """Advance pedestrian FSMs and sync PyBullet bodies."""
         sx, sy = self.cfg['world']['size_xy']
-        xmin, ymin, xmax, ymax = 0.5, 0.5, sx - 0.5, sy - 0.5
 
-        for ped in self.pedestrians:
-            ped.xy = ped.xy + ped.vel * self.dt
+        # Step FSM logic (computes new positions in _fsm_peds)
+        step_fsm_pedestrians(
+            self._fsm_peds,
+            waypoints=self._waypoints,
+            world_size=(sx, sy),
+            dt=self.dt,
+            robot_xy=self.robot_pose.xy(),
+            robot_radius=self.robot_radius,
+        )
 
-            # bounce on bounds
-            if ped.xy[0] < xmin or ped.xy[0] > xmax:
-                ped.vel[0] *= -1
-                ped.xy[0] = np.clip(ped.xy[0], xmin, xmax)
-            if ped.xy[1] < ymin or ped.xy[1] > ymax:
-                ped.vel[1] *= -1
-                ped.xy[1] = np.clip(ped.xy[1], ymin, ymax)
-
-            ped.yaw = math.atan2(ped.vel[1], ped.vel[0] + 1e-9)
+        # Sync Pedestrian (physics layer) ← FSMPedestrian (logic layer)
+        rad = float(self.cfg['pedestrians']['radius'])
+        for ped, fsm_ped in zip(self.pedestrians, self._fsm_peds):
+            ped.xy = fsm_ped.xy.copy()
+            ped.vel = fsm_ped.vel.copy()
+            ped.yaw = fsm_ped.yaw
 
             p.resetBasePositionAndOrientation(
                 ped.body_id,
@@ -442,6 +492,12 @@ class SocialNavSim:
         self._step_pedestrians()
         self.apply_control(v, w)
         p.stepSimulation(physicsClientId=self.client)
+        # Track visited positions for exploration coverage
+        self._visited_xys.append(self.robot_pose.xy().copy())
+
+    def get_visited_xys(self) -> List[np.ndarray]:
+        """Return visited robot positions (for exploration mode)."""
+        return self._visited_xys
 
     def state(self) -> dict:
         return {

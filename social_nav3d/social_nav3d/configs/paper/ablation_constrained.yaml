@@ -1,0 +1,73 @@
+# Ablation: proactive + barrier constraint layer (= full method, alias)
+# Paper ablation: "constrained"
+
+seed: 42
+sim:
+  dt: 0.05
+  max_steps: 2000
+  gui: false
+  record_video: false
+  out_dir: runs/paper/ablation_constrained
+  mode: goal
+
+world:
+  size_xy: [20.0, 20.0]
+  obstacles:
+    - {pos: [6.0, 6.0, 0.5], half_extents: [0.6, 2.0, 0.5]}
+    - {pos: [12.0, 9.0, 0.6], half_extents: [1.5, 0.6, 0.6]}
+    - {pos: [4.0, 14.0, 0.5], half_extents: [0.5, 1.8, 0.5]}
+    - {pos: [15.0, 4.0, 0.5], half_extents: [1.0, 0.5, 0.5]}
+  ramps:
+    - {pos: [9.0, 3.5, 0.0], size: [4.0, 3.0, 0.2], pitch_deg: 12}
+
+robot:
+  start: [1.5, 1.5, 0.0]
+  goal: [18.0, 18.0, 0.0]
+  radius: 0.25
+  height: 0.30
+  max_v: 1.2
+  max_w: 1.8
+
+lidar:
+  n_az: 180
+  n_el: 5
+  max_range: 8.0
+  el_deg: [-10, -5, 0, 5, 10]
+
+pedestrians:
+  count: 6
+  speed_range: [0.4, 1.1]
+  radius: 0.3
+  personal_space:
+    sigma_front: 1.6
+    sigma_side: 0.9
+    sigma_back: 0.7
+  waypoints:
+    - [6.0, 6.0]
+    - [12.0, 9.0]
+    - [4.0, 14.0]
+    - [15.0, 4.0]
+    - [10.0, 10.0]
+    - [3.0, 17.0]
+    - [17.0, 16.0]
+
+planner:
+  horizon_steps: 20
+  n_candidates: 80
+  plan_dt: 0.05
+  lambda_s: 1.0
+  lambda_u: 0.5
+  lambda_d: 0.3
+  lambda_e: 0.0
+  k_goal: 1.0
+  sigma_goal: 3.0
+  k_obs: 2.5
+  obs_influence: 2.5
+  k_ps: 2.0
+  k_align: 0.3
+  k_ctx: 0.4
+  k_frontier: 1.0
+  novelty_radius: 1.5
+  min_clearance: 0.35   # barrier active
+  k_yaw: 2.5
+  heading_slowdown: 0.5
