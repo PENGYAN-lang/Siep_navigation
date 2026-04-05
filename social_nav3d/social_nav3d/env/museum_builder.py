@@ -314,27 +314,29 @@ def build_museum_world(client: int, cfg: dict) -> dict:
 
     # ------------------------------------------------------------------
     # 5. Main gallery top / top corridor bottom  (y = 20)
-    #    Spans x ∈ [4, 30], doorway at x = 13 (into main gallery)
-    #    and another at x = 26 (into wing room)
+    #    Two non-overlapping sections, each with its own doorway:
+    #      • x ∈ [4, 22]  – main gallery ceiling,  doorway at x = 13
+    #      • x ∈ [22, 30] – wing room ceiling,      doorway at x = 26
     # ------------------------------------------------------------------
 
-    # Segment: x ∈ [4, 30] with doorway at x = 13
-    segs_y20 = _wall_with_doorway(
-        client,
-        fixed_coord=20.0,
-        span_min=4.0,
-        span_max=30.0,
-        door_centre=13.0,
-        axis="x",
-    )
-    wall_ids.extend(segs_y20)
-
-    # Additional doorway connecting wing room to top corridor at x = 26
+    # Main gallery ceiling: x ∈ [4, 22], doorway at x = 13
     wall_ids.extend(
         _wall_with_doorway(
             client,
             fixed_coord=20.0,
-            span_min=23.0,
+            span_min=4.0,
+            span_max=22.0,
+            door_centre=13.0,
+            axis="x",
+        )
+    )
+
+    # Wing room ceiling: x ∈ [22, 30], doorway at x = 26
+    wall_ids.extend(
+        _wall_with_doorway(
+            client,
+            fixed_coord=20.0,
+            span_min=22.0,
             span_max=30.0,
             door_centre=26.0,
             axis="x",
