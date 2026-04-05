@@ -465,6 +465,7 @@ class BatchSIEPEvaluator:
         d_near = d[mask]
         a_near = a[mask]
 
+        # Decay length = 40% of influence radius (matches objective_terms.py convention)
         decay = self.obs_influence * 0.4
         magnitudes = self.k_obs * torch.exp(-d_near / max(decay, 1e-6))
 
@@ -828,6 +829,8 @@ class BatchSIEPEvaluator:
             # Current robot position (use initial pose — index 0)
             rx = float(robot_xy[0, 0, 0].item())
             ry = float(robot_xy[0, 0, 1].item())
+            # Probe at 50% of LiDAR distance (avoids probing past obstacles)
+            # clamped to 2× novelty_radius so far-away rays still get evaluated
             probe_dist = min(dist_i * 0.5, self.novelty_radius * 2.0)
             px = rx + probe_dist * math.cos(ang)
             py = ry + probe_dist * math.sin(ang)
@@ -836,6 +839,8 @@ class BatchSIEPEvaluator:
                 float(np.linalg.norm(probe - v)) < self.novelty_radius
                 for v in recent
             )
+            # Visited directions get a reduced novelty score (0.2) to discourage
+            # revisiting while not completely blocking those directions
             novelty_vals.append(0.2 if visited else 1.0)
 
         novelty = torch.tensor(novelty_vals, dtype=dtype, device=dev)
