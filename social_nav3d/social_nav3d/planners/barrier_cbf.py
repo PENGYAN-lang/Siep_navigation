@@ -68,7 +68,7 @@ class BarrierCBF:
         pcfg = cfg.get("planner", {})
         self.r_safe: float = float(pcfg.get("min_clearance", 0.35))
         self._alpha: float = float(pcfg.get("cbf_alpha", 1.0))
-        self._jerk_limit: float = float(pcfg.get("cbf_jerk_limit", 0.3))
+        self._jerk_limit: float = float(pcfg.get("cbf_jerk_limit", 0.5))
 
         self._use_cbf_humans: bool = use_cbf_humans
         self._prev_v: float = 0.0
@@ -296,7 +296,7 @@ if __name__ == "__main__":
             "planner": {
                 "min_clearance": 0.35,
                 "cbf_alpha": 1.0,
-                "cbf_jerk_limit": 0.3,
+                "cbf_jerk_limit": 0.5,
             },
         }
 
@@ -337,8 +337,8 @@ if __name__ == "__main__":
         dists_d = np.array([10.0])            # far away, safety not active
         v_safe_d, _ = cbf.project(pose, v_nom=1.0, w_nom=0.0,
                                    lidar_dists=dists_d, lidar_angles=angles_d)
-        print(f"[D] v_safe={v_safe_d:.4f}  (expect ≤ Δv_max=0.3, jerk limit)")
-        assert v_safe_d <= 0.3 + 1e-9, f"Jerk limit violated: got {v_safe_d}"
+        print(f"[D] v_safe={v_safe_d:.4f}  (expect ≤ Δv_max=0.5, jerk limit)")
+        assert v_safe_d <= 0.5 + 1e-9, f"Jerk limit violated: got {v_safe_d}"
 
         # --- Scenario E: human personal-space barrier -------------------
         cbf2 = BarrierCBF(cfg, use_cbf_humans=True)

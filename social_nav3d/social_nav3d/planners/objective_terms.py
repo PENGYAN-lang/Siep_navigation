@@ -65,6 +65,7 @@ def F_frontier_force(
     visited_xys: List[np.ndarray],
     k: float,
     novelty_radius: float = 1.5,
+    visited_cells: Optional[set] = None,
 ) -> np.ndarray:
     """Frontier exploration force (replaces F_goal in exploration mode).
 
@@ -77,10 +78,24 @@ def F_frontier_force(
     novelty is 1 - overlap with visited positions in that direction.
 
     Paper: G_explore stimulus  (contributes to F_{goal/frontier} in F_tot).
+
+    Parameters
+    ----------
+    visited_cells : optional pre-computed set of ``(int, int)`` grid-cell
+        keys (discretised at ``novelty_radius`` resolution).  When provided
+        the O(1) set-lookup is used instead of re-computing the set each call.
     """
     n = len(lidar_angles)
     if n == 0:
         return np.zeros(2, dtype=float)
+
+    # Build visited-cell set once if not supplied (grid-based novelty check)
+    grid_step = max(novelty_radius, 1e-3)
+    if visited_cells is None and visited_xys:
+        visited_cells = {
+            (int(vxy[0] // grid_step), int(vxy[1] // grid_step))
+            for vxy in visited_xys
+        }
 
     scores = np.zeros(n, dtype=float)
     for idx, (dist, ang) in enumerate(zip(lidar_dists, lidar_angles)):
@@ -88,13 +103,14 @@ def F_frontier_force(
         max_range = float(np.max(lidar_dists)) + 1e-6
         openness = dist / max_range
 
-        # Novelty: check if sampling a point in this direction has been visited
+        # Novelty: check if probe direction falls in a visited grid cell
         probe_dist = min(dist * 0.5, novelty_radius * 2)
         probe_xy = robot_xy + probe_dist * np.array([math.cos(ang), math.sin(ang)])
-        visited = any(
-            float(np.linalg.norm(probe_xy - vxy)) < novelty_radius
-            for vxy in visited_xys[-50:]  # check last 50 positions (efficient)
-        )
+        if visited_cells:
+            cell = (int(probe_xy[0] // grid_step), int(probe_xy[1] // grid_step))
+            visited = cell in visited_cells
+        else:
+            visited = False
         novelty = 0.2 if visited else 1.0
 
         scores[idx] = openness * novelty
@@ -191,6 +207,7 @@ def force_total(
     visited_xys: Optional[List[np.ndarray]] = None,
     k_frontier: float = 1.0,
     novelty_radius: float = 1.5,
+    visited_cells: Optional[set] = None,
 ) -> np.ndarray:
     """Compute total force vector F_tot.
 
@@ -207,6 +224,7 @@ def force_total(
         F = F_frontier_force(
             robot_xy, robot_yaw, lidar_dists, lidar_angles,
             visited_xys, k_frontier, novelty_radius,
+            visited_cells=visited_cells,
         )
     elif goal_xy is not None:
         F = F_goal_force(robot_xy, goal_xy, k_goal, sigma_goal)
@@ -247,6 +265,7 @@ def equilibrium_residual(
     explore_mode: bool = False,
     visited_xys: Optional[List[np.ndarray]] = None,
     uncertainty_scales: Optional[List[List[float]]] = None,
+    visited_cells: Optional[set] = None,
 ) -> float:
     """sum_{tau=1}^{H} ||F_tot(x_tau, H_hat_tau, z_tau)||^2.
 
@@ -280,6 +299,7 @@ def equilibrium_residual(
             visited_xys=visited_xys,
             k_frontier=params.get('k_frontier', 1.0),
             novelty_radius=params.get('novelty_radius', 1.5),
+            visited_cells=visited_cells,
         )
         total += float(np.dot(Fv, Fv))
 
@@ -396,6 +416,7 @@ def exploration_gain(
     robot_traj: List[np.ndarray],
     visited_xys: List[np.ndarray],
     novelty_radius: float = 1.5,
+    visited_cells: Optional[set] = None,
 ) -> float:
     """G_explore(U): reward for visiting novel positions along trajectory.
 
@@ -404,17 +425,26 @@ def exploration_gain(
 
     Computed as the number of trajectory positions that are farther than
     novelty_radius from all previously visited positions.
+
+    Parameters
+    ----------
+    visited_cells : optional pre-computed set of ``(int, int)`` grid-cell keys.
+        When provided the O(1) set-lookup is used.
     """
     if not visited_xys:
         return float(len(robot_traj))
 
+    # Build grid-cell set if not supplied
+    grid_step = max(novelty_radius, 1e-3)
+    if visited_cells is None:
+        visited_cells = {
+            (int(vxy[0] // grid_step), int(vxy[1] // grid_step))
+            for vxy in visited_xys
+        }
+
     gain = 0.0
     for xy in robot_traj[1:]:
-        # Is this position novel?
-        is_novel = all(
-            float(np.linalg.norm(xy - vxy)) > novelty_radius
-            for vxy in visited_xys[-100:]
-        )
-        if is_novel:
+        cell = (int(xy[0] // grid_step), int(xy[1] // grid_step))
+        if cell not in visited_cells:
             gain += 1.0
     return gain

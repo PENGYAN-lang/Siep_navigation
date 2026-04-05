@@ -334,6 +334,11 @@ class SocialNavSim:
 
         # Use typed pedestrians for museum or when count >= 10
         use_typed = (world_type == 'museum' or n >= 10)
+        # Retrieve wall AABBs for wall-aware spawn (museum world)
+        spawn_wall_aabbs = None
+        if hasattr(self, '_museum_data') and self._museum_data is not None:
+            spawn_wall_aabbs = self._museum_data.get('wall_aabbs')
+
         if use_typed:
             self._fsm_peds = create_typed_fsm_pedestrians(
                 n=n,
@@ -342,6 +347,7 @@ class SocialNavSim:
                 radius=rad,
                 waypoints=self._waypoints,
                 seed=seed,
+                wall_aabbs=spawn_wall_aabbs,
             )
         else:
             self._fsm_peds = create_fsm_pedestrians(
@@ -443,6 +449,11 @@ class SocialNavSim:
         """Advance pedestrian FSMs and sync PyBullet bodies."""
         sx, sy = self.cfg['world']['size_xy']
 
+        # Retrieve wall AABBs for collision detection (museum world only)
+        wall_aabbs = None
+        if hasattr(self, '_museum_data') and self._museum_data is not None:
+            wall_aabbs = self._museum_data.get('wall_aabbs')
+
         # Step FSM logic (computes new positions in _fsm_peds)
         step_fsm_pedestrians(
             self._fsm_peds,
@@ -451,6 +462,7 @@ class SocialNavSim:
             dt=self.dt,
             robot_xy=self.robot_pose.xy(),
             robot_radius=self.robot_radius,
+            wall_aabbs=wall_aabbs,
         )
 
         # Sync Pedestrian (physics layer) ← FSMPedestrian (logic layer)
@@ -602,15 +614,26 @@ class SocialNavSim:
         ax.set_ylim(0, sy)
         ax.set_aspect('equal', 'box')
 
-        for ob in self.cfg['world'].get('obstacles', []):
-            pos = ob['pos']
-            hx, hy, _ = ob['half_extents']
-            ax.add_patch(__import__('matplotlib').patches.Rectangle(
-                (pos[0] - hx, pos[1] - hy), 2 * hx, 2 * hy, fill=False
-            ))
+        import matplotlib.patches as mpatches
+
+        # Draw museum walls as filled grey rectangles
+        if hasattr(self, '_museum_data') and self._museum_data is not None:
+            wall_aabbs = self._museum_data.get('wall_aabbs', [])
+            for (xmin_w, ymin_w, xmax_w, ymax_w) in wall_aabbs:
+                ax.add_patch(mpatches.Rectangle(
+                    (xmin_w, ymin_w), xmax_w - xmin_w, ymax_w - ymin_w,
+                    linewidth=0.5, edgecolor='#444', facecolor='#ccc', alpha=0.7,
+                ))
+        else:
+            for ob in self.cfg['world'].get('obstacles', []):
+                pos = ob['pos']
+                hx, hy, _ = ob['half_extents']
+                ax.add_patch(mpatches.Rectangle(
+                    (pos[0] - hx, pos[1] - hy), 2 * hx, 2 * hy, fill=False
+                ))
 
         for ped in self.pedestrians:
-            ax.add_patch(__import__('matplotlib').patches.Circle(
+            ax.add_patch(mpatches.Circle(
                 (float(ped.xy[0]), float(ped.xy[1])), float(ped.radius), fill=False
             ))
 

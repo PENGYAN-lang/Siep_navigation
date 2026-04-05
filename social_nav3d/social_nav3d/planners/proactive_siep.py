@@ -178,6 +178,11 @@ class ProactiveSIEP:
         self._prev_v: float = 0.0
         self._prev_w: float = 0.0
         self._visited_xys: List[np.ndarray] = []
+        # Grid-based visited-cell set for O(1) novelty lookup
+        self._visited_cells: set = set()
+        self._novelty_grid_step: float = max(self.novelty_radius, 1e-3)
+        # Momentum: track consecutive low-speed steps for kick mechanism
+        self._low_speed_steps: int = 0
 
         # Reproducible sampling (seeded per plan call)
         self._rng = np.random.default_rng(int(cfg.get('seed', 42)))
@@ -237,6 +242,10 @@ class ProactiveSIEP:
         """
         robot_xy = pose.xy()
         self._visited_xys.append(robot_xy.copy())
+        # Update visited-cell set (O(1) novelty check in force/gain functions)
+        cell = (int(robot_xy[0] // self._novelty_grid_step),
+                int(robot_xy[1] // self._novelty_grid_step))
+        self._visited_cells.add(cell)
 
         # ── 1. Context inference (once per planning call) ────────────────────
         ped_states = make_ped_states(ped_raw)
@@ -321,6 +330,29 @@ class ProactiveSIEP:
         v_cmd = float(np.clip(best_u[0, 0], -self.max_v, self.max_v))
         w_cmd = float(np.clip(best_u[0, 1], -self.max_w, self.max_w))
 
+        # ── 6b. Momentum kick: escape low-speed traps ────────────────────────
+        # If the robot has been nearly stationary for too long, apply a
+        # random-direction impulse to break out of local force equilibria.
+        if self.explore_mode:
+            if abs(v_cmd) < 0.1:
+                self._low_speed_steps += 1
+            else:
+                self._low_speed_steps = 0
+
+            if self._low_speed_steps >= 20:  # ~1 s at typical 20 Hz plan rate (dt=0.05 s)
+                # Random kick: pick an open direction from lidar
+                if lidar_dists is not None and len(lidar_dists) > 0:
+                    best_dir_idx = int(np.argmax(lidar_dists))
+                    kick_angle = float(lidar_angles_world[best_dir_idx])
+                    # Convert world-frame angle to turning rate
+                    angle_err = float(
+                        math.atan2(math.sin(kick_angle - pose.yaw),
+                                   math.cos(kick_angle - pose.yaw))
+                    )
+                    w_cmd = float(np.clip(self.k_yaw * angle_err, -self.max_w, self.max_w))
+                    v_cmd = self.max_v * 0.5
+                self._low_speed_steps = 0
+
         # ── 7. Barrier projection (safety layer) ────────────────────────────
         if self.use_barrier:
             if self._cbf is not None:
@@ -362,7 +394,7 @@ class ProactiveSIEP:
         # Uniform grid over v and w
         n_v = int(math.sqrt(n * 0.6)) + 1
         n_w = n // n_v + 1
-        vs = np.linspace(-self.max_v * 0.1, self.max_v, n_v)
+        vs = np.linspace(0.1, self.max_v, n_v)   # bias positive: no near-zero/negative
         ws = np.linspace(-self.max_w, self.max_w, n_w)
         vv, ww = np.meshgrid(vs, ws)
         grid_vw = np.stack([vv.ravel(), ww.ravel()], axis=-1)[:n]
@@ -370,7 +402,7 @@ class ProactiveSIEP:
         # Pad or trim to exactly n
         if len(grid_vw) < n:
             extra = self._rng.uniform(
-                low=[-self.max_v * 0.1, -self.max_w],
+                low=[0.1, -self.max_w],
                 high=[self.max_v, self.max_w],
                 size=(n - len(grid_vw), 2),
             )
@@ -384,8 +416,7 @@ class ProactiveSIEP:
         # Add small temporal perturbations (simulates input shaping)
         noise = self._rng.normal(0, 0.05, size=candidates.shape)
         candidates = candidates + noise
-        candidates[:, :, 0] = np.clip(candidates[:, :, 0],
-                                       -self.max_v * 0.1, self.max_v)
+        candidates[:, :, 0] = np.clip(candidates[:, :, 0], 0.0, self.max_v)
         candidates[:, :, 1] = np.clip(candidates[:, :, 1],
                                        -self.max_w, self.max_w)
         return candidates
@@ -475,6 +506,7 @@ class ProactiveSIEP:
             explore_mode=self.explore_mode,
             visited_xys=self._visited_xys,
             uncertainty_scales=unc_scales_traj,
+            visited_cells=self._visited_cells,
         )
 
         # ── Social cost ──────────────────────────────────────────────────
@@ -489,7 +521,8 @@ class ProactiveSIEP:
         # ── Exploration gain ─────────────────────────────────────────────
         if self.explore_mode:
             J_explore = exploration_gain(
-                robot_traj, self._visited_xys, self.novelty_radius
+                robot_traj, self._visited_xys, self.novelty_radius,
+                visited_cells=self._visited_cells,
             )
         else:
             J_explore = 0.0
@@ -602,7 +635,7 @@ class ProactiveSIEP:
         """
         min_dist = float(np.min(lidar_dists)) if len(lidar_dists) > 0 else float('inf')
         safe_dist = self.robot_radius + self.min_clearance
-        margin = 1.5  # [m] – begin slowing down at this distance
+        margin = 0.8  # [m] – begin slowing down at this distance (reduced for museum)
 
         if min_dist < safe_dist:
             # Hard stop: imminent collision
@@ -614,8 +647,8 @@ class ProactiveSIEP:
             v = v * max(0.0, alpha)
 
         # Jerk limiting: limit change in v (smoothness constraint from C_dyn)
-        max_dv = 0.3  # [m/s] max change per step
+        max_dv = 0.5  # [m/s] max change per step (relaxed to allow exploration)
         v = float(np.clip(v, self._prev_v - max_dv, self._prev_v + max_dv))
-        v = float(np.clip(v, -self.max_v * 0.1, self.max_v))
+        v = float(np.clip(v, 0.0, self.max_v))
         w = float(np.clip(w, -self.max_w, self.max_w))
         return v, w

@@ -3,21 +3,21 @@
 Inspired by the layout of Nanjing Museum:
   Entrance hall → main gallery → wing rooms with connecting corridors.
 
-Overall footprint: ~30 m × 25 m.
+Overall footprint: ~40 m × 35 m.
 
 Room layout
 -----------
-  entrance_hall : x 7–15,  y  0– 6   (bottom-centre entrance)
-  main_gallery  : x 4–22,  y  6–20   (large central gallery)
-  left_corridor : x 0– 4,  y  6–20   (narrow left passage)
-  wing_room     : x 22–30, y  8–20   (right wing)
-  top_corridor  : x 4–30,  y 20–25   (upper passage)
+  entrance_hall : x  8–20,  y  0– 8   (bottom-centre entrance, 12 m × 8 m)
+  main_gallery  : x  4–24,  y  8–26   (large central gallery, ~20 m × 18 m)
+  left_corridor : x  0– 4,  y  8–26   (wide left passage, 4 m wide)
+  wing_room     : x 24–40,  y 10–26   (right wing, 16 m × 16 m)
+  top_corridor  : x  4–40,  y 26–35   (upper passage, 36 m × 9 m)
 """
 
 from __future__ import annotations
 
 import math
-from typing import Sequence
+from typing import List, Sequence, Tuple
 
 import numpy as np
 import pybullet as p
@@ -31,25 +31,26 @@ WALL_HALF_T: float = 0.15          # half-thickness of every wall segment
 WALL_COLOR: list[float] = [0.85, 0.82, 0.78, 1.0]   # museum beige
 PEDESTAL_COLOR: list[float] = [0.55, 0.45, 0.35, 1.0]  # dark wood brown
 PEDESTAL_HALF_EXTENTS: list[float] = [0.25, 0.25, 0.4]  # 0.5 m × 0.5 m × 0.8 m tall
-DOORWAY_HALF_GAP: float = 1.0      # half of the 2 m doorway opening
+DOORWAY_HALF_GAP: float = 1.25     # half of the 2.5 m doorway opening
 
 # Pre-defined exhibit positions (x, y) – used as pedestrian waypoints too.
+# Reduced set for the expanded scene (8 pedestals, more spread out).
 EXHIBIT_POSITIONS: list[tuple[float, float]] = [
-    # main gallery (5)
-    (8.0, 10.0), (12.0, 10.0), (16.0, 10.0),
-    (10.0, 15.0), (15.0, 15.0),
+    # main gallery (4)
+    (10.0, 14.0), (16.0, 14.0),
+    (10.0, 21.0), (16.0, 21.0),
     # wing room (3)
-    (24.0, 11.0), (27.0, 11.0), (25.0, 16.0),
-    # entrance hall (2)
-    (9.0, 3.0), (13.0, 3.0),
+    (28.0, 14.0), (34.0, 14.0), (30.0, 20.0),
+    # entrance hall (1)
+    (14.0,  4.0),
 ]
 
 ROOM_BOUNDS: dict[str, list[float]] = {
-    "entrance_hall": [7.0, 0.0, 15.0, 6.0],
-    "main_gallery": [4.0, 6.0, 22.0, 20.0],
-    "left_corridor": [0.0, 6.0, 4.0, 20.0],
-    "wing_room": [22.0, 8.0, 30.0, 20.0],
-    "top_corridor": [4.0, 20.0, 30.0, 25.0],
+    "entrance_hall": [ 8.0,  0.0, 20.0,  8.0],
+    "main_gallery":  [ 4.0,  8.0, 24.0, 26.0],
+    "left_corridor": [ 0.0,  8.0,  4.0, 26.0],
+    "wing_room":     [24.0, 10.0, 40.0, 26.0],
+    "top_corridor":  [ 4.0, 26.0, 40.0, 35.0],
 }
 
 
@@ -207,6 +208,94 @@ def _wall_with_doorway(
 # Public API
 # ---------------------------------------------------------------------------
 
+def _wall_aabbs_with_doorway(
+    fixed_coord: float,
+    span_min: float,
+    span_max: float,
+    door_centre: float,
+    axis: str,
+) -> list[tuple[float, float, float, float]]:
+    """Compute AABBs for a wall-with-doorway without needing PyBullet.
+
+    Mirrors the geometry of :func:`_wall_with_doorway` exactly.
+
+    Returns
+    -------
+    list of (xmin, ymin, xmax, ymax) AABBs
+    """
+    gap_lo = door_centre - DOORWAY_HALF_GAP
+    gap_hi = door_centre + DOORWAY_HALF_GAP
+    aabbs: list[tuple[float, float, float, float]] = []
+
+    for seg_min, seg_max in [(span_min, gap_lo), (gap_hi, span_max)]:
+        if seg_max <= seg_min:
+            continue
+        half_span = (seg_max - seg_min) / 2.0
+        centre_along = (seg_min + seg_max) / 2.0
+        if axis == "x":
+            cx, cy, hw, hd = centre_along, fixed_coord, half_span, WALL_HALF_T
+        else:
+            cx, cy, hw, hd = fixed_coord, centre_along, WALL_HALF_T, half_span
+        aabbs.append((cx - hw, cy - hd, cx + hw, cy + hd))
+
+    return aabbs
+
+
+def build_wall_aabbs() -> list[tuple[float, float, float, float]]:
+    """Return axis-aligned bounding boxes for all museum walls.
+
+    Does **not** require PyBullet — purely geometric.  Mirrors the wall
+    layout of :func:`build_museum_world` exactly so that the FSM
+    pedestrian collision check stays in sync with the 3-D scene.
+
+    Museum footprint: x ∈ [0, 40], y ∈ [0, 35].
+
+    Returns
+    -------
+    list of ``(xmin, ymin, xmax, ymax)`` tuples
+    """
+    aabbs: list[tuple[float, float, float, float]] = []
+
+    def solid(cx: float, cy: float, hw: float, hd: float) -> None:
+        aabbs.append((cx - hw, cy - hd, cx + hw, cy + hd))
+
+    # ── Outer perimeter ──────────────────────────────────────────────
+    # South y = 0, door at x = 14
+    aabbs.extend(_wall_aabbs_with_doorway(0.0, 0.0, 40.0, 14.0, "x"))
+    # North y = 35
+    solid(20.0, 35.0, 20.0, WALL_HALF_T)
+    # West x = 0
+    solid(0.0, 17.5, WALL_HALF_T, 17.5)
+    # East x = 40
+    solid(40.0, 17.5, WALL_HALF_T, 17.5)
+
+    # ── Entrance hall (y = 8 internal wall + side walls) ─────────────
+    # North wall of entrance: y = 8, x ∈ [8, 20], door at x = 14
+    aabbs.extend(_wall_aabbs_with_doorway(8.0, 8.0, 20.0, 14.0, "x"))
+    # West side  x = 8,  y ∈ [0, 8]
+    solid(8.0, 4.0, WALL_HALF_T, 4.0)
+    # East side  x = 20, y ∈ [0, 8]
+    solid(20.0, 4.0, WALL_HALF_T, 4.0)
+
+    # ── Left corridor ↔ main gallery  (x = 4, y ∈ [8, 26]) ──────────
+    # Door at y = 17
+    aabbs.extend(_wall_aabbs_with_doorway(4.0, 8.0, 26.0, 17.0, "y"))
+
+    # ── Main gallery ↔ wing room  (x = 24, y ∈ [10, 26]) ────────────
+    # Door at y = 18
+    aabbs.extend(_wall_aabbs_with_doorway(24.0, 10.0, 26.0, 18.0, "y"))
+    # Wing room south closing wall: y = 10, x ∈ [24, 40]
+    solid(32.0, 10.0, 8.0, WALL_HALF_T)
+
+    # ── Top corridor separator ────────────────────────────────────────
+    # Main gallery ceiling: y = 26, x ∈ [4, 24], door at x = 14
+    aabbs.extend(_wall_aabbs_with_doorway(26.0, 4.0, 24.0, 14.0, "x"))
+    # Wing room ceiling: y = 26, x ∈ [24, 40], door at x = 32
+    aabbs.extend(_wall_aabbs_with_doorway(26.0, 24.0, 40.0, 32.0, "x"))
+
+    return aabbs
+
+
 def build_museum_world(client: int, cfg: dict) -> dict:
     """Build a museum-style environment in PyBullet.
 
@@ -230,115 +319,117 @@ def build_museum_world(client: int, cfg: dict) -> dict:
                                 (also usable as pedestrian waypoints).
         ``room_bounds``       – dict mapping room names to
                                 ``[x_min, y_min, x_max, y_max]``.
+        ``wall_aabbs``        – list of ``(xmin, ymin, xmax, ymax)``
+                                wall bounding boxes for collision checks.
     """
     wall_ids: list[int] = []
 
     # ------------------------------------------------------------------
     # 1. Outer perimeter walls
-    #    Museum footprint: x ∈ [0, 30], y ∈ [0, 25]
+    #    Museum footprint: x ∈ [0, 40], y ∈ [0, 35]
     # ------------------------------------------------------------------
 
-    # South wall  y = 0  (full width, entrance gap at x≈11)
+    # South wall  y = 0  (full width, entrance gap at x = 14)
     wall_ids.extend(
         _wall_with_doorway(
             client,
             fixed_coord=0.0,
             span_min=0.0,
-            span_max=30.0,
-            door_centre=11.0,
+            span_max=40.0,
+            door_centre=14.0,
             axis="x",
         )
     )
 
-    # North wall  y = 25  (full width, no gap)
-    wall_ids.append(_create_wall(client, 15.0, 25.0, 15.0, WALL_HALF_T))
+    # North wall  y = 35  (full width, no gap)
+    wall_ids.append(_create_wall(client, 20.0, 35.0, 20.0, WALL_HALF_T))
 
     # West wall  x = 0  (full height)
-    wall_ids.append(_create_wall(client, 0.0, 12.5, WALL_HALF_T, 12.5))
+    wall_ids.append(_create_wall(client, 0.0, 17.5, WALL_HALF_T, 17.5))
 
-    # East wall  x = 30  (full height)
-    wall_ids.append(_create_wall(client, 30.0, 12.5, WALL_HALF_T, 12.5))
+    # East wall  x = 40  (full height)
+    wall_ids.append(_create_wall(client, 40.0, 17.5, WALL_HALF_T, 17.5))
 
     # ------------------------------------------------------------------
-    # 2. Internal wall: entrance hall ↔ main gallery  (y = 6)
-    #    Runs x ∈ [7, 15], doorway at x = 11
+    # 2. Internal wall: entrance hall ↔ main gallery  (y = 8)
+    #    Runs x ∈ [8, 20], doorway at x = 14
     # ------------------------------------------------------------------
     wall_ids.extend(
         _wall_with_doorway(
             client,
-            fixed_coord=6.0,
-            span_min=7.0,
-            span_max=15.0,
-            door_centre=11.0,
+            fixed_coord=8.0,
+            span_min=8.0,
+            span_max=20.0,
+            door_centre=14.0,
             axis="x",
         )
     )
     # Solid walls closing the sides of the entrance hall pocket
-    # west side of entrance hall  x = 7, y ∈ [0, 6]
-    wall_ids.append(_create_wall(client, 7.0, 3.0, WALL_HALF_T, 3.0))
-    # east side of entrance hall  x = 15, y ∈ [0, 6]
-    wall_ids.append(_create_wall(client, 15.0, 3.0, WALL_HALF_T, 3.0))
+    # west side of entrance hall  x = 8, y ∈ [0, 8]
+    wall_ids.append(_create_wall(client, 8.0, 4.0, WALL_HALF_T, 4.0))
+    # east side of entrance hall  x = 20, y ∈ [0, 8]
+    wall_ids.append(_create_wall(client, 20.0, 4.0, WALL_HALF_T, 4.0))
 
     # ------------------------------------------------------------------
-    # 3. Left corridor ↔ main gallery  (x = 4, y ∈ [6, 20])
-    #    Doorway at y = 13
+    # 3. Left corridor ↔ main gallery  (x = 4, y ∈ [8, 26])
+    #    Doorway at y = 17
     # ------------------------------------------------------------------
     wall_ids.extend(
         _wall_with_doorway(
             client,
             fixed_coord=4.0,
-            span_min=6.0,
-            span_max=20.0,
-            door_centre=13.0,
-            axis="y",
-        )
-    )
-
-    # ------------------------------------------------------------------
-    # 4. Main gallery ↔ wing room  (x = 22, y ∈ [8, 20])
-    #    Doorway at y = 14
-    # ------------------------------------------------------------------
-    wall_ids.extend(
-        _wall_with_doorway(
-            client,
-            fixed_coord=22.0,
             span_min=8.0,
-            span_max=20.0,
-            door_centre=14.0,
+            span_max=26.0,
+            door_centre=17.0,
             axis="y",
         )
     )
-    # Short south wall closing the wing room pocket below y = 8
-    # (x ∈ [22, 30], y = 8)
-    wall_ids.append(_create_wall(client, 26.0, 8.0, 4.0, WALL_HALF_T))
 
     # ------------------------------------------------------------------
-    # 5. Main gallery top / top corridor bottom  (y = 20)
-    #    Two non-overlapping sections, each with its own doorway:
-    #      • x ∈ [4, 22]  – main gallery ceiling,  doorway at x = 13
-    #      • x ∈ [22, 30] – wing room ceiling,      doorway at x = 26
+    # 4. Main gallery ↔ wing room  (x = 24, y ∈ [10, 26])
+    #    Doorway at y = 18
     # ------------------------------------------------------------------
-
-    # Main gallery ceiling: x ∈ [4, 22], doorway at x = 13
     wall_ids.extend(
         _wall_with_doorway(
             client,
-            fixed_coord=20.0,
+            fixed_coord=24.0,
+            span_min=10.0,
+            span_max=26.0,
+            door_centre=18.0,
+            axis="y",
+        )
+    )
+    # Short south wall closing the wing room pocket below y = 10
+    # (x ∈ [24, 40], y = 10)
+    wall_ids.append(_create_wall(client, 32.0, 10.0, 8.0, WALL_HALF_T))
+
+    # ------------------------------------------------------------------
+    # 5. Main gallery top / top corridor bottom  (y = 26)
+    #    Two non-overlapping sections, each with its own doorway:
+    #      • x ∈ [4, 24]  – main gallery ceiling,  doorway at x = 14
+    #      • x ∈ [24, 40] – wing room ceiling,      doorway at x = 32
+    # ------------------------------------------------------------------
+
+    # Main gallery ceiling: x ∈ [4, 24], doorway at x = 14
+    wall_ids.extend(
+        _wall_with_doorway(
+            client,
+            fixed_coord=26.0,
             span_min=4.0,
-            span_max=22.0,
-            door_centre=13.0,
+            span_max=24.0,
+            door_centre=14.0,
             axis="x",
         )
     )
 
-    # Wing room ceiling: x ∈ [22, 30], doorway at x = 26
+    # Wing room ceiling: x ∈ [24, 40], doorway at x = 32
     wall_ids.extend(
         _wall_with_doorway(
             client,
-            fixed_coord=20.0,
-            span_min=22.0,
-            span_max=30.0,
-            door_centre=26.0,
+            fixed_coord=26.0,
+            span_min=24.0,
+            span_max=40.0,
+            door_centre=32.0,
             axis="x",
         )
     )
@@ -355,6 +446,7 @@ def build_museum_world(client: int, cfg: dict) -> dict:
         "exhibit_ids": exhibit_ids,
         "exhibit_positions": list(EXHIBIT_POSITIONS),
         "room_bounds": {k: list(v) for k, v in ROOM_BOUNDS.items()},
+        "wall_aabbs": build_wall_aabbs(),
     }
 
 
