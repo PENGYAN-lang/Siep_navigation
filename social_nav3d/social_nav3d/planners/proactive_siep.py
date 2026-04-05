@@ -73,6 +73,18 @@ from .objective_terms import (
     force_total as _ftot,
 )
 
+# GPU batch evaluator (optional — falls back gracefully if torch not available)
+try:
+    from .gpu_batch_eval import BatchSIEPEvaluator, is_gpu_available
+    _GPU_EVAL_AVAILABLE = True
+except ImportError:
+    _GPU_EVAL_AVAILABLE = False
+    def is_gpu_available() -> bool:  # type: ignore[misc]
+        return False
+
+# Formal CBF safety layer
+from .barrier_cbf import BarrierCBF
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Noise amplitude for uncertainty estimation (noise-injected rollouts)
@@ -170,6 +182,31 @@ class ProactiveSIEP:
         # Reproducible sampling (seeded per plan call)
         self._rng = np.random.default_rng(int(cfg.get('seed', 42)))
 
+        # ── GPU batch evaluator (optional, uses PyTorch CUDA when available) ──
+        # The GPU evaluator handles per-candidate uncertainty cost (C_unc),
+        # fixing the unc_cost_val=0.0 limitation of the CPU path.
+        # Paper: GPU acceleration enables n_candidates=512, S=32 MC samples.
+        use_gpu = bool(pcfg.get('use_gpu', True))  # default: try GPU
+        self._gpu_evaluator: Optional['BatchSIEPEvaluator'] = None
+        if use_gpu and _GPU_EVAL_AVAILABLE:
+            try:
+                from .gpu_batch_eval import BatchSIEPEvaluator
+                self._gpu_evaluator = BatchSIEPEvaluator(cfg)
+                print(f'[ProactiveSIEP] GPU batch evaluator enabled on '
+                      f'{self._gpu_evaluator.device}')
+            except Exception as exc:
+                print(f'[ProactiveSIEP] GPU evaluator init failed ({exc}), '
+                      f'falling back to CPU path.')
+                self._gpu_evaluator = None
+
+        # ── Formal CBF safety layer ───────────────────────────────────────────
+        # Replaces simple clipping with h(x)+α·ḣ(x,u)≥0 QP projection.
+        # Paper: Barrier-SIEP-MPC safety layer (Section IV.C).
+        use_cbf_humans = bool(pcfg.get('use_cbf_humans', True))
+        self._cbf: Optional[BarrierCBF] = None
+        if self.use_barrier:
+            self._cbf = BarrierCBF(cfg, use_cbf_humans=use_cbf_humans)
+
     # ──────────────────────────────────────────────────────────────────────
     # Public interface
     # ──────────────────────────────────────────────────────────────────────
@@ -255,18 +292,30 @@ class ProactiveSIEP:
         candidates = self._sample_candidates()   # (n_cand, H, 2)
 
         # ── 5. Evaluate objective for each candidate ─────────────────────────
-        best_cost = float('inf')
-        best_u = candidates[0]
-
-        for u_seq in candidates:
-            cost = self._evaluate(
-                u_seq, pose, goal_xy,
+        # GPU path: batch evaluation with per-candidate C_unc (MC-Ensemble).
+        # CPU path: sequential loop with pre-computed unc_scales (unc_cost_val
+        # approximated via force inflation rather than per-candidate variance).
+        if self._gpu_evaluator is not None:
+            best_idx, best_cost, _ = self._gpu_evaluator.get_best_candidate(
+                candidates, pose, goal_xy,
                 lidar_dists, lidar_angles_world,
-                ped_states, ped_pss, ctx, cw_base, unc_scales,
+                ped_raw, ped_pss, cw_base, unc_scales,
+                self.explore_mode, self._visited_xys,
             )
-            if cost < best_cost:
-                best_cost = cost
-                best_u = u_seq
+            best_u = candidates[best_idx]
+        else:
+            best_cost = float('inf')
+            best_u = candidates[0]
+
+            for u_seq in candidates:
+                cost = self._evaluate(
+                    u_seq, pose, goal_xy,
+                    lidar_dists, lidar_angles_world,
+                    ped_states, ped_pss, ctx, cw_base, unc_scales,
+                )
+                if cost < best_cost:
+                    best_cost = cost
+                    best_u = u_seq
 
         # ── 6. Extract first action ──────────────────────────────────────────
         v_cmd = float(np.clip(best_u[0, 0], -self.max_v, self.max_v))
@@ -274,9 +323,19 @@ class ProactiveSIEP:
 
         # ── 7. Barrier projection (safety layer) ────────────────────────────
         if self.use_barrier:
-            v_cmd, w_cmd = self._barrier_project(
-                pose, v_cmd, w_cmd, lidar_dists, lidar_angles_world,
-            )
+            if self._cbf is not None:
+                # Formal CBF QP projection: h(x) + α·ḣ(x,u) ≥ 0
+                # Paper: Barrier-SIEP-MPC Section IV.C
+                v_cmd, w_cmd = self._cbf.project(
+                    pose, v_cmd, w_cmd,
+                    lidar_dists, lidar_angles_world,
+                    ped_raw,
+                )
+            else:
+                # Fallback: simple clipping (backward compatibility)
+                v_cmd, w_cmd = self._barrier_project(
+                    pose, v_cmd, w_cmd, lidar_dists, lidar_angles_world,
+                )
 
         self._prev_v = v_cmd
         self._prev_w = w_cmd
@@ -395,10 +454,16 @@ class ProactiveSIEP:
 
         # ── Uncertainty scales (pre-computed, broadcast over horizon) ─────
         unc_scales_traj = [[unc_scales[j] for j in range(n_peds)]] * (H + 1)
-        # Per-candidate uncertainty cost is approximated as zero to avoid
-        # re-running _estimate_uncertainty per candidate (too expensive).
-        # The pre-computed unc_scales still modulate F_human via force inflation.
-        unc_cost_val = 0.0
+        # CPU path: compute uncertainty cost from pre-computed unc_scales.
+        # This quantifies the expected variance in F_human across pedestrians,
+        # weighted by their uncertainty scales from the noise-injected rollouts.
+        # Paper: C_unc = sum_j (unc_scale_j - 1)^2 (variance proxy).
+        # Note: On the GPU path, per-candidate C_unc is computed via MC-Ensemble
+        # (S=32 noisy samples), which is more accurate but requires BatchSIEPEvaluator.
+        if self.use_uncertainty_ps and unc_scales:
+            unc_cost_val = float(np.sum([(s - 1.0) ** 2 for s in unc_scales]))
+        else:
+            unc_cost_val = 0.0
 
         # ── Equilibrium residual  ────────────────────────────────────────
         J_eq = equilibrium_residual(
