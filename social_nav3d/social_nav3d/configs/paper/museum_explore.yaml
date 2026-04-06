@@ -6,7 +6,7 @@
 seed: 42
 sim:
   dt: 0.05
-  max_steps: 5000
+  max_steps: 6000
   gui: false
   record_video: true
   camera_mode: follow    # follow | overhead | cinematic
@@ -32,8 +32,8 @@ lidar:
   el_deg: [-5, 0, 5]
 
 pedestrians:
-  count: 9                    # reduced — larger scene keeps density comfortable
-  speed_range: [0.2, 0.5]    # realistic museum visitor pace
+  count: 8                    # reduced — larger scene keeps density comfortable
+  speed_range: [0.15, 0.4]   # realistic museum visitor pace
   radius: 0.3
   personal_space:
     sigma_front: 1.6
@@ -71,13 +71,13 @@ planner:
   lambda_s: 1.0            # social cost weight
   lambda_u: 0.8            # uncertainty cost weight
   lambda_d: 0.3            # dynamics cost weight
-  lambda_e: 5.0            # exploration gain weight — dominant term in explore mode
+  lambda_e: 8.0            # exploration gain weight — dominant term in explore mode
 
   # SIEP force parameters
   k_goal: 0.0              # no goal force in explore mode
   sigma_goal: 3.0
-  k_obs: 1.5               # reduced obstacle repulsion to avoid tight-space traps
-  obs_influence: 1.5       # reduced influence radius — less braking near walls
+  k_obs: 1.0               # reduced obstacle repulsion to avoid tight-space traps
+  obs_influence: 1.2       # reduced influence radius — less braking near walls
   k_ps: 2.5                # personal-space repulsion in museum
   k_align: 0.4
   k_ctx: 0.5
@@ -85,9 +85,9 @@ planner:
   novelty_radius: 2.0      # grid cell size for visited-area tracking
 
   # Safety barrier (CBF)
-  min_clearance: 0.25      # reduced minimum obstacle clearance
-  cbf_alpha: 1.0           # CBF decay rate α
-  cbf_jerk_limit: 0.8      # relaxed max velocity change per step [m/s]
+  min_clearance: 0.20      # reduced minimum obstacle clearance
+  cbf_alpha: 0.5           # CBF decay rate α — softer barrier activation
+  cbf_jerk_limit: 1.0      # relaxed max velocity change per step [m/s]
 
   # Heading controller
   k_yaw: 2.5
