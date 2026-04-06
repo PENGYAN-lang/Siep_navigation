@@ -121,11 +121,9 @@ class BarrierCBF:
         constraints: list[tuple[float, float]] = []
 
         # ---- obstacle barrier (Eq. IV.C-1) — direction-aware ----------
-        # Use nominal velocity direction; fall back to current heading if
-        # v_nom ≈ 0 so stationary turns don't lock onto side/rear obstacles.
-        heading: float = pose.yaw if abs(v_nom) < 1e-3 else pose.yaw
+        # The robot's movement direction is its current yaw (unicycle model).
         cbf_obs, g_obs = self._obstacle_constraint(
-            v_nom, lidar_dists, lidar_angles, heading
+            v_nom, lidar_dists, lidar_angles, pose.yaw
         )
         constraints.append((cbf_obs, g_obs))
 

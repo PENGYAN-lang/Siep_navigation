@@ -144,11 +144,15 @@ class BatchSIEPEvaluator:
         self._novelty_grid_step: float = max(self.novelty_radius, 1e-3)
         # Endpoint bonus: extra weight for a trajectory whose endpoint is novel.
         # Encourages candidates that reach genuinely new territory.
-        self._endpoint_bonus_w: float = 2.0
+        self._endpoint_bonus_w: float = float(pcfg.get("endpoint_bonus_w", 2.0))
         # Room-crossing bonus: extra weight when the endpoint is far from the
-        # robot's current position (> 3× novelty_radius), incentivising the
-        # robot to cross doorways into unexplored rooms.
-        self._room_bonus_w: float = 10.0
+        # robot's current position (> room_bonus_dist_mult × novelty_grid_step),
+        # incentivising the robot to cross doorways into unexplored rooms.
+        self._room_bonus_w: float = float(pcfg.get("room_bonus_w", 10.0))
+        # Distance multiplier for room-crossing threshold (multiples of grid step).
+        self._room_bonus_dist_mult: float = float(
+            pcfg.get("room_bonus_dist_mult", 3.0)
+        )
 
         # ── Uncertainty estimation ────────────────────────────────────────
         #    Default: 32 on GPU, 5 on CPU (matches ProactiveSIEP behaviour)
@@ -838,11 +842,11 @@ class BatchSIEPEvaluator:
 
             # ── Room-crossing bonus: reward trajectories that reach far ──────
             # Endpoint distance from robot start (t=0).  When this distance
-            # exceeds 3× novelty_radius the candidate is crossing into a new
-            # spatial region (room), earning an additional bonus.
+            # exceeds room_bonus_dist_mult × novelty_grid_step the candidate is
+            # crossing into a new spatial region (room), earning a bonus.
             start_xy = traj_np[:, 0, :]        # (n_cand, 2) — first traj step
             end_xy = traj_np[:, -1, :]         # (n_cand, 2) — last traj step
-            room_threshold = self._novelty_grid_step * 3.0
+            room_threshold = self._novelty_grid_step * self._room_bonus_dist_mult
             end_dist = np.linalg.norm(end_xy - start_xy, axis=1)  # (n_cand,)
             room_bonus = (end_dist > room_threshold).astype(np.float32)
             gain += self._room_bonus_w * room_bonus
