@@ -66,9 +66,9 @@ class BarrierCBF:
         self.r_robot: float = float(rcfg["radius"])
 
         pcfg = cfg.get("planner", {})
-        self.r_safe: float = float(pcfg.get("min_clearance", 0.35))
-        self._alpha: float = float(pcfg.get("cbf_alpha", 1.0))
-        self._jerk_limit: float = float(pcfg.get("cbf_jerk_limit", 0.5))
+        self.r_safe: float = float(pcfg.get("min_clearance", 0.20))
+        self._alpha: float = float(pcfg.get("cbf_alpha", 0.5))
+        self._jerk_limit: float = float(pcfg.get("cbf_jerk_limit", 1.0))
 
         self._use_cbf_humans: bool = use_cbf_humans
         self._prev_v: float = 0.0
@@ -120,8 +120,11 @@ class BarrierCBF:
         """
         constraints: list[tuple[float, float]] = []
 
-        # ---- obstacle barrier (Eq. IV.C-1) ----------------------------
-        cbf_obs, g_obs = self._obstacle_constraint(v_nom, lidar_dists, lidar_angles)
+        # ---- obstacle barrier (Eq. IV.C-1) — direction-aware ----------
+        # The robot's movement direction is its current yaw (unicycle model).
+        cbf_obs, g_obs = self._obstacle_constraint(
+            v_nom, lidar_dists, lidar_angles, pose.yaw
+        )
         constraints.append((cbf_obs, g_obs))
 
         # ---- human personal-space barriers (Eq. IV.C-2) ---------------
@@ -157,33 +160,52 @@ class BarrierCBF:
         v_nom: float,
         lidar_dists: np.ndarray,
         lidar_angles: np.ndarray,
+        heading: float = 0.0,
     ) -> tuple[float, float]:
-        """Compute CBF value and ∂ḣ/∂v for the nearest obstacle.
+        """Compute CBF value and ∂ḣ/∂v for the nearest *forward* obstacle.
 
-        Barrier (Eq. IV.C-1):
+        Direction-aware barrier (Eq. IV.C-1):
             h_obs = d_min − (r_robot + r_safe)
             ḣ_obs = ∂h/∂v · v  where  ∂h/∂v = −cos(θ_nearest)
 
-        The lidar angle θ_nearest is measured in the robot frame, so the
-        component of v_robot along the obstacle direction is v·cos(θ_nearest).
-        The sign of ḣ_obs is negative when moving toward the obstacle.
+        Only LiDAR rays within ±90° of the robot's movement direction
+        (``heading``) are considered, so side/rear walls do not activate
+        the barrier and block forward motion through doorways.  The full
+        ray set is used as a fallback if no forward rays exist.
 
         Args:
             v_nom: Nominal linear velocity.
-            lidar_dists: Range array [m].
-            lidar_angles: Angle array [rad], robot frame.
+            lidar_dists: Range array [m], world frame.
+            lidar_angles: Angle array [rad], world frame.
+            heading: Current movement direction [rad], world frame.
 
         Returns:
             (cbf_value, gradient):  cbf_value = ḣ_obs(v_nom) + α·h_obs,
                                     gradient  = ∂ḣ_obs/∂v.
         """
-        idx_min: int = int(np.argmin(lidar_dists))
-        d_min: float = float(lidar_dists[idx_min])
-        theta_nearest: float = float(lidar_angles[idx_min])
+        # Angular difference between each ray and the movement heading.
+        # Wrap to (−π, π].
+        angle_diff = lidar_angles - heading
+        angle_diff = (angle_diff + math.pi) % (2 * math.pi) - math.pi
+
+        # Keep only rays within ±90° of the movement direction.
+        forward_mask = np.abs(angle_diff) <= (math.pi / 2.0)
+
+        if forward_mask.any():
+            fwd_dists = lidar_dists[forward_mask]
+            fwd_angles = lidar_angles[forward_mask]
+        else:
+            # Fallback: no forward rays — use all rays.
+            fwd_dists = lidar_dists
+            fwd_angles = lidar_angles
+
+        idx_min: int = int(np.argmin(fwd_dists))
+        d_min: float = float(fwd_dists[idx_min])
+        theta_nearest: float = float(fwd_angles[idx_min])
 
         h_obs: float = d_min - (self.r_robot + self.r_safe)
-        # ∂ḣ_obs/∂v = −cos(θ_nearest)  (robot-frame decomposition)
-        g_v: float = -math.cos(theta_nearest)
+        # ∂ḣ_obs/∂v = −cos(θ_nearest − heading)  (projection onto heading)
+        g_v: float = -math.cos(theta_nearest - heading)
         cbf_val: float = g_v * v_nom + self._alpha * h_obs
         return cbf_val, g_v
 

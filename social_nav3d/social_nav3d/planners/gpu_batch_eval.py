@@ -142,6 +142,17 @@ class BatchSIEPEvaluator:
         self.k_frontier: float = float(pcfg.get("k_frontier", 1.0))
         # Grid step matches the novelty radius (same as ProactiveSIEP)
         self._novelty_grid_step: float = max(self.novelty_radius, 1e-3)
+        # Endpoint bonus: extra weight for a trajectory whose endpoint is novel.
+        # Encourages candidates that reach genuinely new territory.
+        self._endpoint_bonus_w: float = float(pcfg.get("endpoint_bonus_w", 2.0))
+        # Room-crossing bonus: extra weight when the endpoint is far from the
+        # robot's current position (> room_bonus_dist_mult × novelty_grid_step),
+        # incentivising the robot to cross doorways into unexplored rooms.
+        self._room_bonus_w: float = float(pcfg.get("room_bonus_w", 10.0))
+        # Distance multiplier for room-crossing threshold (multiples of grid step).
+        self._room_bonus_dist_mult: float = float(
+            pcfg.get("room_bonus_dist_mult", 3.0)
+        )
 
         # ── Uncertainty estimation ────────────────────────────────────────
         #    Default: 32 on GPU, 5 on CPU (matches ProactiveSIEP behaviour)
@@ -494,7 +505,7 @@ class BatchSIEPEvaluator:
         # residual being completely dominated by F_obs in tight spaces.
         # This preserves the direction of the force but limits its magnitude
         # so that G_explore (exploration gain) can still discriminate candidates.
-        max_obs_force = 5.0
+        max_obs_force = 2.0
         F_norm = F.norm().clamp(min=1e-6)
         if F_norm > max_obs_force:
             F = F * (max_obs_force / F_norm)
@@ -821,6 +832,25 @@ class BatchSIEPEvaluator:
                 novel = np.ones((n_cand, H), dtype=bool)
 
             gain = novel.sum(axis=1).astype(np.float32)  # (n_cand,)
+
+            # ── Endpoint bonus: extra credit for a novel trajectory endpoint ──
+            # novel[:, -1] is True when the last cell of the trajectory has not
+            # been visited before.  Multiply by _endpoint_bonus_w so candidates
+            # that push into genuinely new territory are strongly preferred.
+            endpoint_novel = novel[:, -1].astype(np.float32)
+            gain += self._endpoint_bonus_w * endpoint_novel
+
+            # ── Room-crossing bonus: reward trajectories that reach far ──────
+            # Endpoint distance from robot start (t=0).  When this distance
+            # exceeds room_bonus_dist_mult × novelty_grid_step the candidate is
+            # crossing into a new spatial region (room), earning a bonus.
+            start_xy = traj_np[:, 0, :]        # (n_cand, 2) — first traj step
+            end_xy = traj_np[:, -1, :]         # (n_cand, 2) — last traj step
+            room_threshold = self._novelty_grid_step * self._room_bonus_dist_mult
+            end_dist = np.linalg.norm(end_xy - start_xy, axis=1)  # (n_cand,)
+            room_bonus = (end_dist > room_threshold).astype(np.float32)
+            gain += self._room_bonus_w * room_bonus
+
             return torch.tensor(gain, dtype=dtype, device=dev)
 
         # ── Fallback: distance-based check (last 100 visited positions) ──
