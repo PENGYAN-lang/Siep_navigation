@@ -140,6 +140,19 @@ class BatchSIEPEvaluator:
         # ── Exploration ───────────────────────────────────────────────────
         self.novelty_radius: float = float(pcfg.get("novelty_radius", 1.5))
         self.k_frontier: float = float(pcfg.get("k_frontier", 1.0))
+        # Grid step matches the novelty radius (same as ProactiveSIEP)
+        self._novelty_grid_step: float = max(self.novelty_radius, 1e-3)
+        # Endpoint bonus: extra weight for a trajectory whose endpoint is novel.
+        # Encourages candidates that reach genuinely new territory.
+        self._endpoint_bonus_w: float = float(pcfg.get("endpoint_bonus_w", 2.0))
+        # Room-crossing bonus: extra weight when the endpoint is far from the
+        # robot's current position (> room_bonus_dist_mult × novelty_grid_step),
+        # incentivising the robot to cross doorways into unexplored rooms.
+        self._room_bonus_w: float = float(pcfg.get("room_bonus_w", 10.0))
+        # Distance multiplier for room-crossing threshold (multiples of grid step).
+        self._room_bonus_dist_mult: float = float(
+            pcfg.get("room_bonus_dist_mult", 3.0)
+        )
 
         # ── Uncertainty estimation ────────────────────────────────────────
         #    Default: 32 on GPU, 5 on CPU (matches ProactiveSIEP behaviour)
@@ -165,6 +178,7 @@ class BatchSIEPEvaluator:
         unc_scales: List[float],
         explore_mode: bool,
         visited_xys: List[np.ndarray],
+        visited_cells: Optional[set] = None,
     ) -> "torch.Tensor":
         """Evaluate all candidate control sequences in parallel on GPU/CPU.
 
@@ -194,6 +208,12 @@ class BatchSIEPEvaluator:
             If True, use frontier exploration reward instead of goal attraction.
         visited_xys : list of np.ndarray
             Previously visited robot positions (used by exploration gain).
+        visited_cells : set of (int, int) or None
+            Grid-based visited-cell set for O(1) novelty lookup.  When
+            provided, ``_compute_exploration_gain`` uses this instead of the
+            distance-based ``visited_xys[-100:]`` fallback, which loses
+            accuracy once the robot has looped through the same region many
+            times.
 
         Returns
         -------
@@ -223,9 +243,15 @@ class BatchSIEPEvaluator:
 
         # ── 3. Goal / exploration force tensor ────────────────────────────
         if explore_mode:
-            F_goal_seq = self._compute_frontier_forces(
-                robot_xy, robot_yaw, lidar_dists, lidar_angles, visited_xys
-            )  # (n_cand, H+1, 2)
+            # In explore mode, the frontier force vector is identical for every
+            # candidate (it is computed from the current pose, not the candidate
+            # endpoint), so including it in F_tot gives zero discriminative power.
+            # Instead we zero it out here and rely entirely on G_explore
+            # (weighted by lambda_e) to guide the robot toward unvisited regions.
+            # See Problem 1 in the issue description.
+            F_goal_seq = torch.zeros(
+                n_cand, H + 1, 2, dtype=robot_xy.dtype, device=robot_xy.device
+            )
         else:
             F_goal_seq = self._compute_goal_forces(robot_xy, goal_xy)
             # (n_cand, H+1, 2)
@@ -297,7 +323,7 @@ class BatchSIEPEvaluator:
 
         # ── 8. Exploration gain ───────────────────────────────────────────
         G_explore = self._compute_exploration_gain(
-            robot_xy, visited_xys, dev, dtype
+            robot_xy, visited_xys, dev, dtype, visited_cells=visited_cells
         )  # (n_cand,)
 
         # ── 9. Composite objective ────────────────────────────────────────
@@ -325,6 +351,7 @@ class BatchSIEPEvaluator:
         unc_scales: List[float],
         explore_mode: bool,
         visited_xys: List[np.ndarray],
+        visited_cells: Optional[set] = None,
     ) -> tuple:
         """Evaluate all candidates and return the one with lowest cost.
 
@@ -350,6 +377,7 @@ class BatchSIEPEvaluator:
             ped_states, ped_pss,
             cw_base, unc_scales,
             explore_mode, visited_xys,
+            visited_cells=visited_cells,
         )
         best_idx = int(torch.argmin(costs).item())
         best_cost = float(costs[best_idx].item())
@@ -471,7 +499,17 @@ class BatchSIEPEvaluator:
 
         fx = -(magnitudes * torch.cos(a_near)).sum()
         fy = -(magnitudes * torch.sin(a_near)).sum()
-        return torch.stack([fx, fy])
+        F = torch.stack([fx, fy])
+
+        # Clamp total obstacle force magnitude to avoid the equilibrium
+        # residual being completely dominated by F_obs in tight spaces.
+        # This preserves the direction of the force but limits its magnitude
+        # so that G_explore (exploration gain) can still discriminate candidates.
+        max_obs_force = 2.0
+        F_norm = F.norm().clamp(min=1e-6)
+        if F_norm > max_obs_force:
+            F = F * (max_obs_force / F_norm)
+        return F
 
     def _pack_ped_tensors(
         self,
@@ -738,27 +776,88 @@ class BatchSIEPEvaluator:
         visited_xys: List[np.ndarray],
         dev: "torch.device",
         dtype: "torch.dtype",
+        visited_cells: Optional[set] = None,
     ) -> "torch.Tensor":
         """Count novel positions along each candidate trajectory.
 
         Paper: G_explore(U) = #{tau : ||x_tau - v||_2 > novelty_radius forall v}
 
-        A position is novel if it is farther than ``novelty_radius`` from all
-        previously visited positions (last 100 are checked for efficiency).
+        When ``visited_cells`` (a set of grid-cell (int, int) tuples) is
+        provided, novelty is checked via O(1) hash-set lookup using the same
+        grid resolution as ``ProactiveSIEP._visited_cells``.  This is accurate
+        even after thousands of steps because it checks the *complete* visited
+        history rather than only the last 100 positions.
+
+        Falls back to the distance-based ``visited_xys[-100:]`` approach when
+        ``visited_cells`` is not supplied (backward compatibility).
 
         Parameters
         ----------
         robot_xy    : Tensor (n_cand, H+1, 2)
         visited_xys : list of np.ndarray (2,)
+        visited_cells : set of (int, int) or None
 
         Returns
         -------
         Tensor, shape (n_cand,)
         """
+        n_cand = robot_xy.shape[0]
+        H = robot_xy.shape[1] - 1  # H+1 states → H steps after t=0
+
+        if visited_cells is not None:
+            # Grid-based O(1) lookup — accurate across the full run history.
+            # Encode each (cx, cy) grid cell as a single int64 key so we can
+            # use numpy's vectorised isin() without Python loops per cell.
+            traj = robot_xy[:, 1:, :]  # (n_cand, H, 2) — skip t=0
+            traj_np = traj.detach().cpu().numpy()
+
+            step = self._novelty_grid_step
+            cells_x = np.floor(traj_np[:, :, 0] / step).astype(np.int64)  # (n_cand, H)
+            cells_y = np.floor(traj_np[:, :, 1] / step).astype(np.int64)  # (n_cand, H)
+
+            # A large-enough offset to make (x, y) → int64 bijective for
+            # typical world sizes (up to ±50 000 cells on each axis).
+            OFFSET = np.int64(100_000)
+            candidate_keys = cells_x * OFFSET + cells_y  # (n_cand, H)
+
+            if visited_cells:
+                visited_keys = np.fromiter(
+                    (int(cx) * OFFSET + int(cy) for cx, cy in visited_cells),
+                    dtype=np.int64,
+                    count=len(visited_cells),
+                )
+                novel = ~np.isin(candidate_keys, visited_keys)  # (n_cand, H)
+            else:
+                # No visited cells yet — every position is novel
+                novel = np.ones((n_cand, H), dtype=bool)
+
+            gain = novel.sum(axis=1).astype(np.float32)  # (n_cand,)
+
+            # ── Endpoint bonus: extra credit for a novel trajectory endpoint ──
+            # novel[:, -1] is True when the last cell of the trajectory has not
+            # been visited before.  Multiply by _endpoint_bonus_w so candidates
+            # that push into genuinely new territory are strongly preferred.
+            endpoint_novel = novel[:, -1].astype(np.float32)
+            gain += self._endpoint_bonus_w * endpoint_novel
+
+            # ── Room-crossing bonus: reward trajectories that reach far ──────
+            # Endpoint distance from robot start (t=0).  When this distance
+            # exceeds room_bonus_dist_mult × novelty_grid_step the candidate is
+            # crossing into a new spatial region (room), earning a bonus.
+            start_xy = traj_np[:, 0, :]        # (n_cand, 2) — first traj step
+            end_xy = traj_np[:, -1, :]         # (n_cand, 2) — last traj step
+            room_threshold = self._novelty_grid_step * self._room_bonus_dist_mult
+            end_dist = np.linalg.norm(end_xy - start_xy, axis=1)  # (n_cand,)
+            room_bonus = (end_dist > room_threshold).astype(np.float32)
+            gain += self._room_bonus_w * room_bonus
+
+            return torch.tensor(gain, dtype=dtype, device=dev)
+
+        # ── Fallback: distance-based check (last 100 visited positions) ──
         if not visited_xys:
             # Every position is novel — gain = H (all steps after t=0)
             return torch.full(
-                (robot_xy.shape[0],), float(self.H), dtype=dtype, device=dev
+                (n_cand,), float(H), dtype=dtype, device=dev
             )
 
         # Use last 100 visited positions for efficiency

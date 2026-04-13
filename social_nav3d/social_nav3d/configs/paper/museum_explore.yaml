@@ -6,9 +6,9 @@
 seed: 42
 sim:
   dt: 0.05
-  max_steps: 3000
+  max_steps: 6000
   gui: false
-  record_video: false
+  record_video: true
   camera_mode: follow    # follow | overhead | cinematic
   out_dir: runs/museum/explore
   mode: explore          # free exploration (no pre-set goal)
@@ -18,7 +18,7 @@ world:
   size_xy: [40.0, 35.0]  # expanded museum floor area (40 m × 35 m)
 
 robot:
-  start: [14.0, 2.0, 0.0]   # entrance hall centre
+  start: [14.0, 14.0, 0.0]   # main gallery centre — avoids entrance-hall trap
   goal:  [32.0, 20.0, 0.0]  # wing room (used in goal mode only)
   radius: 0.25
   height: 0.30
@@ -32,8 +32,8 @@ lidar:
   el_deg: [-5, 0, 5]
 
 pedestrians:
-  count: 9                    # reduced — larger scene keeps density comfortable
-  speed_range: [0.2, 0.5]    # realistic museum visitor pace
+  count: 8                    # reduced — larger scene keeps density comfortable
+  speed_range: [0.15, 0.4]   # realistic museum visitor pace
   radius: 0.3
   personal_space:
     sigma_front: 1.6
@@ -71,23 +71,23 @@ planner:
   lambda_s: 1.0            # social cost weight
   lambda_u: 0.8            # uncertainty cost weight
   lambda_d: 0.3            # dynamics cost weight
-  lambda_e: 1.8            # exploration gain weight (strong for free roam)
+  lambda_e: 8.0            # exploration gain weight — dominant term in explore mode
 
   # SIEP force parameters
   k_goal: 0.0              # no goal force in explore mode
   sigma_goal: 3.0
-  k_obs: 2.5
-  obs_influence: 2.0       # slightly reduced to avoid excessive braking
+  k_obs: 1.0               # reduced obstacle repulsion to avoid tight-space traps
+  obs_influence: 1.2       # reduced influence radius — less braking near walls
   k_ps: 2.5                # personal-space repulsion in museum
   k_align: 0.4
   k_ctx: 0.5
-  k_frontier: 2.0          # stronger frontier pull for multi-room coverage
+  k_frontier: 2.0          # frontier pull (used in CPU path)
   novelty_radius: 2.0      # grid cell size for visited-area tracking
 
   # Safety barrier (CBF)
-  min_clearance: 0.35      # minimum obstacle clearance
-  cbf_alpha: 1.0           # CBF decay rate α
-  cbf_jerk_limit: 0.5      # relaxed max velocity change per step [m/s]
+  min_clearance: 0.20      # reduced minimum obstacle clearance
+  cbf_alpha: 0.5           # CBF decay rate α — softer barrier activation
+  cbf_jerk_limit: 1.0      # relaxed max velocity change per step [m/s]
 
   # Heading controller
   k_yaw: 2.5

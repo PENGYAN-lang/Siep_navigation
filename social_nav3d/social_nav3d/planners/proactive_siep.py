@@ -310,6 +310,7 @@ class ProactiveSIEP:
                 lidar_dists, lidar_angles_world,
                 ped_raw, ped_pss, cw_base, unc_scales,
                 self.explore_mode, self._visited_xys,
+                visited_cells=self._visited_cells,
             )
             best_u = candidates[best_idx]
         else:
@@ -339,7 +340,7 @@ class ProactiveSIEP:
             else:
                 self._low_speed_steps = 0
 
-            if self._low_speed_steps >= 20:  # ~1 s at typical 20 Hz plan rate (dt=0.05 s)
+            if self._low_speed_steps >= 15:  # ~0.75 s at typical 20 Hz plan rate (dt=0.05 s)
                 # Random kick: pick an open direction from lidar
                 if lidar_dists is not None and len(lidar_dists) > 0:
                     best_dir_idx = int(np.argmax(lidar_dists))
@@ -350,7 +351,7 @@ class ProactiveSIEP:
                                    math.cos(kick_angle - pose.yaw))
                     )
                     w_cmd = float(np.clip(self.k_yaw * angle_err, -self.max_w, self.max_w))
-                    v_cmd = self.max_v * 0.5
+                    v_cmd = self.max_v * 0.7
                 self._low_speed_steps = 0
 
         # ── 7. Barrier projection (safety layer) ────────────────────────────
@@ -394,7 +395,7 @@ class ProactiveSIEP:
         # Uniform grid over v and w
         n_v = int(math.sqrt(n * 0.6)) + 1
         n_w = n // n_v + 1
-        vs = np.linspace(0.1, self.max_v, n_v)   # bias positive: no near-zero/negative
+        vs = np.linspace(0.15, self.max_v, n_v)   # bias positive: no near-zero/negative
         ws = np.linspace(-self.max_w, self.max_w, n_w)
         vv, ww = np.meshgrid(vs, ws)
         grid_vw = np.stack([vv.ravel(), ww.ravel()], axis=-1)[:n]
